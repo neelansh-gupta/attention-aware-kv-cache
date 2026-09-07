@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model / cache downloads
+.cache/
+*.bin
+*.safetensors
+huggingface_hub_cache/
+
+# OS
+.DS_Store
+
+# Results that are large or regenerable (raw plots are fine to keep small,
+# but avoid committing bulky intermediate artifacts by default)
+results/raw/
+results/*.pt
+results/*.npz
+
+# Editors
+.vscode/
+.idea/
