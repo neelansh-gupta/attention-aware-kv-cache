@@ -1,1 +1,5 @@
 #required libraries and modules
+torch
+transformers>=4.43.1
+accelerate
+safetensors
