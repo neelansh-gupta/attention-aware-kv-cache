@@ -1,41 +1,36 @@
 # Project Status
 
 ## Completed Stages
-
 - Stage 0 — Repository Foundation
 - Stage 1 — Model Loading + KV Cache Inspection
+- Stage 2 — Attention Instrumentation + Attention Sink Analysis
 
 ## Current Stage
-
-Stage 1 completed.
+Stage 2 completed.
 
 ## Next Stage
+Stage 3 — Sliding Window Cache
 
-Stage 2 — Attention Instrumentation + Attention Sink Analysis
-
-## Stage 1 Implementation
-
+## Stage 2 Implementation
 Implemented:
+- Attention extraction from model forward passes.
+- Per-layer attention tensor inspection.
+- Attention averaging across heads.
+- Attention received by each token position.
+- Early-token attention analysis for the first 1, 2, 4, and 8 tokens.
+- Most-attended token position measurement.
+- Attention distribution visualization.
+- Early-token attention visualization.
+- Layer-wise attention visualization.
+- First-layer head-wise attention visualization.
+- Experimental analysis without hard-coding the presence of attention sinks.
+- Attention analysis output stored under `results/attention/`.
 
-- Qwen/Qwen2.5-0.5B model loading.
-- Tokenizer loading.
-- Automatic CPU/CUDA device selection.
-- Normal forward pass.
-- Incremental token-by-token generation.
-- KV-cache inspection.
-- Compatibility with modern Hugging Face Cache objects.
-- Compatibility with legacy tuple-style `past_key_values`.
-- Attention tensor inspection.
-- Stage 1 smoke test through `python -m src.model_wrapper`.
-
-No KV-cache eviction has been implemented.
+No KV-cache eviction policy has been implemented yet.
 
 ## Tests Completed
-
-Stage 1 smoke test:
+Stage 2 attention analysis:
 
 ```bash
-python -m src.model_wrapper
+python visualize.py
 ```
-
-Expected output: `0.0.2`
