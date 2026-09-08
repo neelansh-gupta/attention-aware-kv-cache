@@ -1,36 +1,30 @@
-# Project Status
+## Current Status
 
-## Completed Stages
-- Stage 0 — Repository Foundation
-- Stage 1 — Model Loading + KV Cache Inspection
-- Stage 2 — Attention Instrumentation + Attention Sink Analysis
+- Stage 0: Complete
+- Stage 1: Complete
+- Stage 2: Complete
+- Stage 3: Complete
 
-## Current Stage
-Stage 2 completed.
+### Stage 3 — Sliding Window Cache
 
-## Next Stage
-Stage 3 — Sliding Window Cache
+Implemented a fixed-size sliding-window KV-cache eviction policy.
 
-## Stage 2 Implementation
-Implemented:
-- Attention extraction from model forward passes.
-- Per-layer attention tensor inspection.
-- Attention averaging across heads.
-- Attention received by each token position.
-- Early-token attention analysis for the first 1, 2, 4, and 8 tokens.
-- Most-attended token position measurement.
-- Attention distribution visualization.
-- Early-token attention visualization.
-- Layer-wise attention visualization.
-- First-layer head-wise attention visualization.
-- Experimental analysis without hard-coding the presence of attention sinks.
-- Attention analysis output stored under `results/attention/`.
+#### Implementation
 
-No KV-cache eviction policy has been implemented yet.
+- Added sliding-window cache eviction utilities.
+- Added `SlidingWindowCacheManager`.
+- Integrated the cache manager with model generation.
+- Uses Hugging Face's native `DynamicCache`.
+- Uses `DynamicCache.crop()` to retain only the most recent `window_size` KV entries.
+- Added unit tests for cache eviction and cache-budget enforcement.
+- Verified sliding-window generation with the Qwen2.5-0.5B model.
 
-## Tests Completed
-Stage 2 attention analysis:
+#### Verification
 
-```bash
-python visualize.py
-```
+- `python test_sliding_window.py` — passed.
+- `python -m src.model_wrapper` — passed.
+- Sliding-window generation integration test — passed.
+
+### Next Stage
+
+Stage 4 — StreamingLLM / Attention-Sink-Aware Cache

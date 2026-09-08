@@ -6,12 +6,18 @@ from typing import Any, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from .cache_manager import SlidingWindowCacheManager
+
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-0.5B"
 
 
 @dataclass
 class CacheInfo:
+    """
+    Basic information about the model KV cache.
+    """
+
     num_layers: int
     sequence_length: int
     key_shape: tuple
@@ -21,52 +27,38 @@ class CacheInfo:
 @dataclass
 class AttentionAnalysis:
     """
-    Container for attention analysis results.
-
-    attention_by_layer:
-        List of tensors, one per layer.
-        Each tensor has shape:
-            [num_heads, query_length, key_length]
-
-    mean_attention_by_layer:
-        List of tensors, one per layer.
-        Each tensor has shape:
-            [query_length, key_length]
-
-    token_attention_received:
-        Tensor containing attention received by each key/token position,
-        averaged across layers, heads and query positions.
-        Shape:
-            [key_length]
+    Container for attention-analysis results.
     """
 
-    attention_by_layer: list[torch.Tensor]
-    mean_attention_by_layer: list[torch.Tensor]
-    token_attention_received: torch.Tensor
-
-    def early_token_attention(self, token_counts=(1, 2, 4, 8)) -> dict[int, float]:
-        """
-        Return the fraction of total received attention directed to
-        the first N tokens.
-        """
-        results = {}
-
-        total = self.token_attention_received.sum().item()
-
-        if total <= 0:
-            return {n: 0.0 for n in token_counts}
-
-        for n in token_counts:
-            n = min(n, self.token_attention_received.numel())
-
-            mass = self.token_attention_received[:n].sum().item()
-
-            results[n] = mass / total
-
-        return results
+    attention_received: torch.Tensor
+    early_token_attention: torch.Tensor
+    most_attended_token: int
 
 
 class ModelWrapper:
+    """
+    Wrapper around a Hugging Face causal language model.
+
+    Stages implemented:
+        Stage 1:
+            - Model loading
+            - Tokenization
+            - Incremental generation
+            - KV-cache inspection
+
+        Stage 2:
+            - Attention extraction
+            - Attention aggregation
+            - Attention-sink analysis
+
+        Stage 3:
+            - Sliding-window KV-cache eviction
+
+    Note:
+        Correct RoPE/position handling after cache eviction is
+        intentionally deferred to Stage 6.
+    """
+
     def __init__(
         self,
         model_name: str = DEFAULT_MODEL_NAME,
@@ -75,34 +67,23 @@ class ModelWrapper:
         self.model_name = model_name
 
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
 
         self.device = torch.device(device)
-
-        print(f"Loading tokenizer: {model_name}")
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name
         )
 
-        print(f"Loading model on {self.device}")
-
-        model_kwargs = {}
-
-        # We explicitly use eager attention because we need access to
-        # attention probability tensors.
-        try:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                attn_implementation="eager",
-                **model_kwargs,
-            )
-        except TypeError:
-            # Compatibility fallback for older transformers versions.
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                **model_kwargs,
-            )
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            attn_implementation="eager",
+        )
 
         self.model.to(self.device)
         self.model.eval()
@@ -111,10 +92,14 @@ class ModelWrapper:
     # Tokenization
     # ------------------------------------------------------------------
 
-    def tokenize(self, text: str) -> dict[str, torch.Tensor]:
+    def tokenize(
+        self,
+        text: str,
+    ) -> dict[str, torch.Tensor]:
         """
-        Tokenize text and move tensors to the selected device.
+        Tokenize input text and move tensors to the model device.
         """
+
         inputs = self.tokenizer(
             text,
             return_tensors="pt",
@@ -126,30 +111,104 @@ class ModelWrapper:
         }
 
     # ------------------------------------------------------------------
-    # Forward pass
+    # Stage 1: Incremental generation
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def forward(
+    def incremental_generate(
         self,
-        text: str,
-        output_attentions: bool = False,
-        use_cache: bool = True,
-    ):
+        prompt: str,
+        max_new_tokens: int = 32,
+    ) -> str:
         """
-        Run a normal forward pass.
-
-        output_attentions=True is required for attention analysis.
+        Generate tokens incrementally using the model's KV cache.
         """
-        inputs = self.tokenize(text)
 
-        outputs = self.model(
-            **inputs,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
+        inputs = self.tokenize(prompt)
+
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+
+        generated_ids = input_ids.clone()
+
+        past_key_values = None
+
+        for _ in range(max_new_tokens):
+
+            if past_key_values is None:
+                current_input_ids = input_ids
+            else:
+                current_input_ids = generated_ids[:, -1:]
+
+            position_ids = (
+                attention_mask.cumsum(dim=-1) - 1
+            )
+
+            if past_key_values is not None:
+                position_ids = position_ids[:, -1:]
+
+            kwargs = {
+                "input_ids": current_input_ids,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "past_key_values": past_key_values,
+                "use_cache": True,
+            }
+
+            try:
+                outputs = self.model(
+                    **kwargs,
+                    cache_position=torch.arange(
+                        attention_mask.shape[-1]
+                        - current_input_ids.shape[-1],
+                        attention_mask.shape[-1],
+                        device=self.device,
+                    ),
+                )
+            except (TypeError, ValueError):
+                outputs = self.model(**kwargs)
+
+            next_token = torch.argmax(
+                outputs.logits[:, -1, :],
+                dim=-1,
+                keepdim=True,
+            )
+
+            generated_ids = torch.cat(
+                [
+                    generated_ids,
+                    next_token,
+                ],
+                dim=-1,
+            )
+
+            attention_mask = torch.cat(
+                [
+                    attention_mask,
+                    torch.ones(
+                        (attention_mask.shape[0], 1),
+                        dtype=attention_mask.dtype,
+                        device=self.device,
+                    ),
+                ],
+                dim=-1,
+            )
+
+            past_key_values = outputs.past_key_values
+
+            if (
+                self.tokenizer.eos_token_id is not None
+                and torch.all(
+                    next_token
+                    == self.tokenizer.eos_token_id
+                )
+            ):
+                break
+
+        return self.tokenizer.decode(
+            generated_ids[0],
+            skip_special_tokens=True,
         )
-
-        return outputs
 
     # ------------------------------------------------------------------
     # Cache inspection
@@ -160,257 +219,256 @@ class ModelWrapper:
         past_key_values: Any,
     ) -> Optional[CacheInfo]:
         """
-        Inspect both modern Hugging Face Cache objects and legacy
-        tuple-style past_key_values.
+        Inspect the structure and dimensions of a KV cache.
         """
 
         if past_key_values is None:
             return None
 
-        # --------------------------------------------------------------
-        # Modern Hugging Face Cache API
-        # --------------------------------------------------------------
+        legacy_cache = self._cache_to_legacy(
+            past_key_values
+        )
 
-        if hasattr(past_key_values, "key_cache"):
-            key_cache = past_key_values.key_cache
-            value_cache = past_key_values.value_cache
-
-            if len(key_cache) == 0:
-                return None
-
-            key = key_cache[0]
-            value = value_cache[0]
-
-            sequence_length = key.shape[-2]
-
+        if legacy_cache is None or len(legacy_cache) == 0:
             return CacheInfo(
-                num_layers=len(key_cache),
-                sequence_length=sequence_length,
-                key_shape=tuple(key.shape),
-                value_shape=tuple(value.shape),
+                num_layers=0,
+                sequence_length=0,
+                key_shape=(),
+                value_shape=(),
             )
 
-        # --------------------------------------------------------------
-        # Legacy tuple-style cache
-        # --------------------------------------------------------------
+        first_key, first_value = legacy_cache[0]
 
-        if isinstance(past_key_values, (tuple, list)):
-            if len(past_key_values) == 0:
-                return None
-
-            first_layer = past_key_values[0]
-
-            if isinstance(first_layer, (tuple, list)):
-                key = first_layer[0]
-                value = first_layer[1]
-
-                sequence_length = key.shape[-2]
-
-                return CacheInfo(
-                    num_layers=len(past_key_values),
-                    sequence_length=sequence_length,
-                    key_shape=tuple(key.shape),
-                    value_shape=tuple(value.shape),
-                )
-
-        return None
+        return CacheInfo(
+            num_layers=len(legacy_cache),
+            sequence_length=first_key.shape[-2],
+            key_shape=tuple(first_key.shape),
+            value_shape=tuple(first_value.shape),
+        )
 
     # ------------------------------------------------------------------
-    # Attention inspection
+    # Stage 2: Attention extraction
     # ------------------------------------------------------------------
 
-    def inspect_attention(self, outputs) -> list[torch.Tensor]:
-        """
-        Extract attention tensors from a model output.
-
-        Each tensor is expected to have shape:
-
-            [batch, heads, query_length, key_length]
-
-        The returned tensors have the batch dimension removed.
-        """
-
-        attentions = getattr(outputs, "attentions", None)
-
-        if attentions is None:
-            return []
-
-        result = []
-
-        for attention in attentions:
-            if attention is None:
-                continue
-
-            # We analyze one example at a time.
-            # Shape:
-            # [batch, heads, query_length, key_length]
-            if attention.dim() == 4:
-                attention = attention[0]
-
-            result.append(
-                attention.detach().float().cpu()
-            )
-
-        return result
-
-    # ------------------------------------------------------------------
-    # Attention analysis
-    # ------------------------------------------------------------------
-
-    def analyze_attention(
+    @torch.no_grad()
+    def inspect_attention(
         self,
-        text: str,
-    ) -> AttentionAnalysis:
+        prompt: str,
+    ) -> tuple[
+        torch.Tensor,
+        list[tuple[int, int]],
+    ]:
         """
-        Run the model with attention outputs enabled and calculate:
+        Run the model with attentions enabled.
 
-        1. Attention tensors for every layer.
-        2. Mean attention over heads for every layer.
-        3. Attention received by every token position.
+        Returns:
+            attentions:
+                Tuple-like structure containing attention tensors
+                for every layer.
 
-        The analysis is performed on the supplied text.
-
-        No attention-sink conclusion is hard-coded here.
+            token_ids:
+                Token IDs corresponding to the input sequence.
         """
 
-        outputs = self.forward(
-            text,
+        inputs = self.tokenize(prompt)
+
+        outputs = self.model(
+            **inputs,
             output_attentions=True,
             use_cache=False,
         )
 
-        attentions = self.inspect_attention(outputs)
+        attentions = outputs.attentions
 
-        if not attentions:
-            raise RuntimeError(
-                "No attention tensors were returned. "
-                "Make sure eager attention is enabled and "
-                "output_attentions=True is supported."
+        token_ids = inputs["input_ids"][0].tolist()
+
+        return (
+            attentions,
+            [
+                (token_id, index)
+                for index, token_id in enumerate(token_ids)
+            ],
+        )
+
+    def analyze_attention(
+        self,
+        attentions,
+    ) -> AttentionAnalysis:
+        """
+        Aggregate attention across layers and heads.
+
+        For each layer:
+            [batch, heads, query, key]
+
+        First average over heads, then average over layers.
+
+        The resulting matrix has shape:
+
+            [sequence_length, sequence_length]
+        """
+
+        if attentions is None or len(attentions) == 0:
+            raise ValueError(
+                "No attention tensors were provided."
             )
 
-        mean_attention_by_layer = []
+        layer_attention = []
 
-        # --------------------------------------------------------------
-        # Average attention across heads.
-        #
-        # Original:
-        # [heads, query_length, key_length]
-        #
-        # Result:
-        # [query_length, key_length]
-        # --------------------------------------------------------------
+        for attention in attentions:
+            if attention.dim() != 4:
+                raise ValueError(
+                    "Expected attention tensor with shape "
+                    "[batch, heads, query, key]."
+                )
 
-        for layer_attention in attentions:
-            mean_attention = layer_attention.mean(dim=0)
-
-            mean_attention_by_layer.append(
-                mean_attention
+            averaged_heads = attention.mean(
+                dim=1
             )
 
-        # --------------------------------------------------------------
-        # Calculate attention RECEIVED by each token.
-        #
-        # For each layer:
-        #
-        #   average over heads
-        #   average over query positions
-        #
-        # Result:
-        #   [key_length]
-        # --------------------------------------------------------------
-
-        received_attention_per_layer = []
-
-        for layer_attention in attentions:
-            mean_over_heads = layer_attention.mean(dim=0)
-
-            received = mean_over_heads.mean(dim=0)
-
-            received_attention_per_layer.append(
-                received
+            layer_attention.append(
+                averaged_heads
             )
 
-        token_attention_received = torch.stack(
-            received_attention_per_layer,
+        attention_matrix = torch.stack(
+            layer_attention,
             dim=0,
         ).mean(dim=0)
 
-        return AttentionAnalysis(
-            attention_by_layer=attentions,
-            mean_attention_by_layer=mean_attention_by_layer,
-            token_attention_received=token_attention_received,
+        attention_matrix = attention_matrix[0]
+
+        attention_received = attention_matrix.sum(
+            dim=0
         )
 
-    # ------------------------------------------------------------------
-    # Early-token sink analysis
-    # ------------------------------------------------------------------
+        early_count = min(
+            5,
+            attention_matrix.shape[-1],
+        )
+
+        early_token_attention = attention_matrix[
+            :,
+            :early_count,
+        ].sum(
+            dim=0
+        )
+
+        most_attended_token = int(
+            torch.argmax(
+                attention_received
+            ).item()
+        )
+
+        return AttentionAnalysis(
+            attention_received=attention_received,
+            early_token_attention=early_token_attention,
+            most_attended_token=most_attended_token,
+        )
 
     def analyze_attention_sinks(
         self,
-        text: str,
-        token_counts=(1, 2, 4, 8),
+        attentions,
+        early_token_count: int = 5,
     ) -> dict[str, Any]:
         """
-        Calculate statistics describing how much attention is received
-        by early tokens.
+        Analyze how much attention is received by early tokens.
 
-        This function intentionally reports measurements rather than
-        declaring that attention sinks exist.
+        Returns:
+            A dictionary containing:
+                - attention_received
+                - early_token_attention
+                - early_token_fraction
+                - most_attended_token
         """
 
-        analysis = self.analyze_attention(text)
-
-        early_mass = analysis.early_token_attention(
-            token_counts=token_counts
+        analysis = self.analyze_attention(
+            attentions
         )
 
-        received = analysis.token_attention_received
+        sequence_length = (
+            analysis.attention_received.shape[-1]
+        )
 
-        if received.numel() == 0:
-            raise RuntimeError(
-                "Attention analysis produced no token positions."
+        early_token_count = min(
+            early_token_count,
+            sequence_length,
+        )
+
+        early_attention = (
+            analysis.attention_received[
+                :early_token_count
+            ]
+        )
+
+        total_attention = (
+            analysis.attention_received.sum()
+        )
+
+        if total_attention.item() == 0:
+            early_fraction = torch.tensor(
+                0.0,
+                device=total_attention.device,
+            )
+        else:
+            early_fraction = (
+                early_attention.sum()
+                / total_attention
             )
 
-        # Most-attended token position.
-        top_position = int(
-            torch.argmax(received).item()
-        )
-
-        # Normalize to a probability distribution.
-        normalized_received = (
-            received / received.sum()
-        )
-
         return {
-            "sequence_length": int(received.numel()),
-            "early_token_attention": early_mass,
-            "most_attended_token_position": top_position,
-            "token_attention_received": normalized_received,
-            "analysis": analysis,
+            "attention_received": (
+                analysis.attention_received
+            ),
+            "early_token_attention": (
+                early_attention
+            ),
+            "early_token_fraction": (
+                early_fraction
+            ),
+            "most_attended_token": (
+                analysis.most_attended_token
+            ),
         }
 
     # ------------------------------------------------------------------
-    # Incremental generation
+    # Stage 3: Sliding-window generation
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def incremental_generate(
+    def sliding_window_generate(
         self,
         prompt: str,
         max_new_tokens: int = 32,
+        window_size: int = 128,
     ) -> str:
         """
-        Generate tokens one at a time while explicitly carrying the
-        past_key_values cache.
+        Generate tokens while enforcing a fixed-size
+        sliding-window KV-cache budget.
+
+        Stage 3:
+            - Uses Hugging Face's native DynamicCache.
+            - Keeps only the most recent `window_size` entries.
+            - Does not convert the cache to the legacy tuple format.
+
+        Important:
+            Correct RoPE/position handling after eviction is
+            intentionally deferred to Stage 6.
         """
+
+        if window_size <= 0:
+            raise ValueError(
+                "window_size must be positive."
+            )
 
         inputs = self.tokenize(prompt)
 
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
 
-        past_key_values = None
+        manager = SlidingWindowCacheManager(
+            window_size=window_size
+        )
 
+        past_key_values = None
         generated_ids = input_ids.clone()
 
         for _ in range(max_new_tokens):
@@ -455,7 +513,10 @@ class ModelWrapper:
             )
 
             generated_ids = torch.cat(
-                [generated_ids, next_token],
+                [
+                    generated_ids,
+                    next_token,
+                ],
                 dim=-1,
             )
 
@@ -471,110 +532,103 @@ class ModelWrapper:
                 dim=-1,
             )
 
+            # Keep the native Hugging Face DynamicCache.
             past_key_values = outputs.past_key_values
 
-            # Stop at EOS.
-            if self.tokenizer.eos_token_id is not None:
-                if torch.all(
+            # Enforce the sliding-window budget using
+            # DynamicCache.crop().
+            past_key_values = manager.update(
+                past_key_values
+            )
+
+            # The mask must correspond to the retained cache
+            # plus the current/new token.
+            cache_length = manager.sequence_length(
+                past_key_values
+            )
+
+            expected_mask_length = cache_length + 1
+
+            if attention_mask.shape[-1] > expected_mask_length:
+                attention_mask = attention_mask[
+                    :,
+                    -expected_mask_length:,
+                ]
+
+            if (
+                self.tokenizer.eos_token_id is not None
+                and torch.all(
                     next_token
                     == self.tokenizer.eos_token_id
-                ):
-                    break
+                )
+            ):
+                break
 
         return self.tokenizer.decode(
             generated_ids[0],
             skip_special_tokens=True,
         )
 
-    # ------------------------------------------------------------------
-    # Model summary
-    # ------------------------------------------------------------------
 
-    def print_model_summary(self):
-        config = self.model.config
-
-        print("\nModel Summary")
-        print("-------------")
-        print(f"Model: {self.model_name}")
-        print(f"Device: {self.device}")
-
-        for attribute in [
-            "num_hidden_layers",
-            "num_attention_heads",
-            "num_key_value_heads",
-            "hidden_size",
-            "max_position_embeddings",
-        ]:
-            value = getattr(config, attribute, "N/A")
-            print(f"{attribute}: {value}")
-
-    # ------------------------------------------------------------------
-    # Stage 1 smoke test
-    # ------------------------------------------------------------------
-
-    def run_smoke_test(self):
-        """
-        Basic Stage 1 compatibility test.
-        """
-
-        prompt = "The capital of France is"
-
-        outputs = self.forward(
-            prompt,
-            output_attentions=True,
-            use_cache=True,
-        )
-
-        print("Forward pass successful.")
-
-        cache_info = self.inspect_cache(
-            outputs.past_key_values
-        )
-
-        if cache_info is not None:
-            print("\nKV Cache")
-            print("--------")
-            print(f"Layers: {cache_info.num_layers}")
-            print(
-                f"Sequence length: "
-                f"{cache_info.sequence_length}"
-            )
-            print(
-                f"Key shape: "
-                f"{cache_info.key_shape}"
-            )
-            print(
-                f"Value shape: "
-                f"{cache_info.value_shape}"
-            )
-
-        attentions = self.inspect_attention(outputs)
-
-        print("\nAttention")
-        print("---------")
-        print(f"Number of layers: {len(attentions)}")
-
-        if attentions:
-            print(
-                f"First layer attention shape: "
-                f"{tuple(attentions[0].shape)}"
-            )
-
-        generated = self.incremental_generate(
-            prompt,
-            max_new_tokens=16,
-        )
-
-        print("\nGenerated text:")
-        print(generated)
-
+# ----------------------------------------------------------------------
+# Smoke test
+# ----------------------------------------------------------------------
 
 def main():
+    """
+    Basic Stage 1/Stage 2 model-wrapper smoke test.
+    """
+
     wrapper = ModelWrapper()
 
-    wrapper.print_model_summary()
+    prompt = (
+        "The history of artificial intelligence is"
+    )
 
-    wrapper.run_smoke_test()
+    print("Model:", wrapper.model_name)
+    print("Device:", wrapper.device)
+
+    print("\nIncremental generation:")
+    result = wrapper.incremental_generate(
+        prompt,
+        max_new_tokens=16,
+    )
+    print(result)
+
+    print("\nAttention analysis:")
+    attentions, token_info = (
+        wrapper.inspect_attention(
+            prompt
+        )
+    )
+
+    analysis = wrapper.analyze_attention(
+        attentions
+    )
+
+    print(
+        "Most attended token index:",
+        analysis.most_attended_token,
+    )
+
+    print(
+        "Attention received:",
+        analysis.attention_received,
+    )
+
+    print("\nAttention sink analysis:")
+    sink_analysis = (
+        wrapper.analyze_attention_sinks(
+            attentions
+        )
+    )
+
+    print(
+        "Early-token attention fraction:",
+        sink_analysis[
+            "early_token_fraction"
+        ].item(),
+    )
 
 
 if __name__ == "__main__":
