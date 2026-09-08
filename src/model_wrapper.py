@@ -6,7 +6,10 @@ from typing import Any, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .cache_manager import SlidingWindowCacheManager
+from .cache_manager import (
+    AttentionSinkCacheManager,
+    SlidingWindowCacheManager,
+)
 
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-0.5B"
@@ -45,7 +48,6 @@ class ModelWrapper:
             - Tokenization
             - Incremental generation
             - KV-cache inspection
-
         Stage 2:
             - Attention extraction
             - Attention aggregation
@@ -53,6 +55,9 @@ class ModelWrapper:
 
         Stage 3:
             - Sliding-window KV-cache eviction
+
+        Stage 4:
+            - StreamingLLM-style attention-sink-aware KV-cache eviction
 
     Note:
         Correct RoPE/position handling after cache eviction is
@@ -543,6 +548,151 @@ class ModelWrapper:
 
             # The mask must correspond to the retained cache
             # plus the current/new token.
+            cache_length = manager.sequence_length(
+                past_key_values
+            )
+
+            expected_mask_length = cache_length + 1
+
+            if attention_mask.shape[-1] > expected_mask_length:
+                attention_mask = attention_mask[
+                    :,
+                    -expected_mask_length:,
+                ]
+
+            if (
+                self.tokenizer.eos_token_id is not None
+                and torch.all(
+                    next_token
+                    == self.tokenizer.eos_token_id
+                )
+            ):
+                break
+
+        return self.tokenizer.decode(
+            generated_ids[0],
+            skip_special_tokens=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Stage 4: StreamingLLM / attention-sink-aware generation
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def streaming_llm_generate(
+        self,
+        prompt: str,
+        max_new_tokens: int = 32,
+        cache_budget: int = 128,
+        sink_tokens: int = 4,
+    ) -> str:
+        """
+        Generate tokens using a StreamingLLM-style KV-cache policy.
+
+        The cache retains:
+            - the first `sink_tokens` tokens
+            - the most recent tokens filling the remaining budget
+
+        Important:
+            Correct RoPE/position handling after eviction is intentionally
+            deferred to Stage 6.
+        """
+
+        if cache_budget <= 0:
+            raise ValueError(
+                "cache_budget must be positive."
+            )
+
+        if sink_tokens < 0:
+            raise ValueError(
+                "sink_tokens must be non-negative."
+            )
+
+        if sink_tokens >= cache_budget:
+            raise ValueError(
+                "sink_tokens must be smaller than cache_budget."
+            )
+
+        inputs = self.tokenize(prompt)
+
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+
+        manager = AttentionSinkCacheManager(
+            cache_budget=cache_budget,
+            sink_tokens=sink_tokens,
+        )
+
+        past_key_values = None
+        generated_ids = input_ids.clone()
+
+        for _ in range(max_new_tokens):
+
+            if past_key_values is None:
+                current_input_ids = input_ids
+            else:
+                current_input_ids = generated_ids[:, -1:]
+
+            position_ids = (
+                attention_mask.cumsum(dim=-1) - 1
+            )
+
+            if past_key_values is not None:
+                position_ids = position_ids[:, -1:]
+
+            kwargs = {
+                "input_ids": current_input_ids,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "past_key_values": past_key_values,
+                "use_cache": True,
+            }
+
+            try:
+                outputs = self.model(
+                    **kwargs,
+                    cache_position=torch.arange(
+                        attention_mask.shape[-1]
+                        - current_input_ids.shape[-1],
+                        attention_mask.shape[-1],
+                        device=self.device,
+                    ),
+                )
+            except (TypeError, ValueError):
+                outputs = self.model(**kwargs)
+
+            next_token = torch.argmax(
+                outputs.logits[:, -1, :],
+                dim=-1,
+                keepdim=True,
+            )
+
+            generated_ids = torch.cat(
+                [
+                    generated_ids,
+                    next_token,
+                ],
+                dim=-1,
+            )
+
+            attention_mask = torch.cat(
+                [
+                    attention_mask,
+                    torch.ones(
+                        (attention_mask.shape[0], 1),
+                        dtype=attention_mask.dtype,
+                        device=self.device,
+                    ),
+                ],
+                dim=-1,
+            )
+
+            past_key_values = outputs.past_key_values
+
+            past_key_values = manager.update(
+                past_key_values
+            )
+
             cache_length = manager.sequence_length(
                 past_key_values
             )
