@@ -215,6 +215,135 @@ def attention_sink_evict(
 
     return tuple(evicted_cache)
 
+def heavy_hitter_evict(
+    past_key_values: Any,
+    attention_scores: torch.Tensor,
+    cache_budget: int,
+):
+    """
+    Keep the tokens with the highest accumulated attention scores.
+
+    This implements the Stage 5 H2O-style heavy-hitter policy.
+
+    Args:
+        past_key_values:
+            Legacy tuple/list KV cache:
+                (
+                    (key_layer_0, value_layer_0),
+                    ...
+                )
+
+        attention_scores:
+            One accumulated attention score per cached token.
+            Expected shape:
+                [sequence_length]
+            or
+                [1, sequence_length]
+
+        cache_budget:
+            Maximum number of tokens to retain.
+
+    Returns:
+        A tuple-style KV cache containing only the selected
+        heavy-hitter tokens, in their original sequence order.
+
+    Important:
+        Correct RoPE/position handling after non-contiguous
+        eviction is intentionally deferred to Stage 6.
+    """
+
+    if cache_budget <= 0:
+        raise ValueError(
+            f"cache_budget must be positive, got {cache_budget}"
+        )
+
+    if past_key_values is None:
+        return None
+
+    if not isinstance(past_key_values, (tuple, list)):
+        raise TypeError(
+            "heavy_hitter_evict expects a legacy tuple/list KV cache."
+        )
+
+    if len(past_key_values) == 0:
+        return tuple()
+
+    if not isinstance(attention_scores, torch.Tensor):
+        raise TypeError(
+            "attention_scores must be a torch.Tensor."
+        )
+
+    if attention_scores.dim() == 2:
+        if attention_scores.shape[0] != 1:
+            raise ValueError(
+                "attention_scores with 2 dimensions must have "
+                "shape [1, sequence_length]."
+            )
+        attention_scores = attention_scores[0]
+
+    if attention_scores.dim() != 1:
+        raise ValueError(
+            "attention_scores must have shape "
+            "[sequence_length] or [1, sequence_length]."
+        )
+
+    first_key, first_value = past_key_values[0]
+
+    sequence_length = first_key.shape[-2]
+
+    if attention_scores.shape[0] != sequence_length:
+        raise ValueError(
+            "Attention-score length must match the KV-cache "
+            f"sequence length. Got scores={attention_scores.shape[0]}, "
+            f"cache={sequence_length}."
+        )
+
+    # Nothing to evict.
+    if sequence_length <= cache_budget:
+        return tuple(
+            (key, value)
+            for key, value in past_key_values
+        )
+
+    # Select the highest-scoring tokens.
+    top_k = torch.topk(
+        attention_scores,
+        k=cache_budget,
+        dim=-1,
+    ).indices
+
+    # Restore original sequence order.
+    selected_indices = torch.sort(top_k).values
+
+    evicted_cache = []
+
+    for key, value in past_key_values:
+        if key.shape[-2] != sequence_length:
+            raise ValueError(
+                "All cache layers must have the same sequence length."
+            )
+
+        if value.shape[-2] != sequence_length:
+            raise ValueError(
+                "Key/value sequence lengths must match."
+            )
+
+        new_key = key.index_select(
+            dim=-2,
+            index=selected_indices.to(key.device),
+        )
+
+        new_value = value.index_select(
+            dim=-2,
+            index=selected_indices.to(value.device),
+        )
+
+        evicted_cache.append(
+            (new_key, new_value)
+        )
+
+    return tuple(evicted_cache)
+
 def cache_sequence_length(
     past_key_values: Any,
 ) -> int:
