@@ -294,6 +294,7 @@ Tests verify:
     ├── PROJECT_STATUS.md
     ├── README.md
     ├── requirements.txt
+    ├── benchmark.py
     │
     ├── stage4_experiment.py
     ├── test_correctness.py
@@ -415,6 +416,13 @@ Runs the Stage 2 long-context attention measurement and writes plots plus JSON.
 
 ---
 
+## `benchmark.py`
+
+Stage 8 benchmark infrastructure. Records hardware, library versions, policy,
+budget, wall-clock time, and peak memory to JSON/CSV.
+
+---
+
 # Stages
 
 | Stage | Description | Status |
@@ -427,7 +435,8 @@ Runs the Stage 2 long-context attention measurement and writes plots plus JSON.
 | Stage 5 | H2O-style heavy-hitter eviction | ✅ Complete |
 | Stage 6 | RoPE and position handling after eviction | ✅ Complete |
 | Stage 7 | Full correctness harness | ✅ Complete |
-| Stage 8 | Benchmarking and evaluation | ⏭️ Next |
+| Stage 8 | Benchmark infrastructure | ✅ Complete |
+| Stage 9 | Perplexity and Needle-in-a-Haystack | ⏭️ Next |
 
 ---
 
@@ -588,6 +597,7 @@ Run measured attention analysis:
 Run the real Stage 4 policy comparison:
 
     python stage4_experiment.py
+    python benchmark.py --all --budget 32 --max-new-tokens 4
 
 ---
 
@@ -612,43 +622,41 @@ These generation runs confirm that the implementations execute successfully, but
 
 The current project focuses on implementation and correctness of KV cache compression.
 
-It does not yet provide a complete quantitative comparison of:
+Stage 8 records wall-clock time and peak memory for the three eviction
+policies. It does not yet measure:
 
-- Generation latency
-- Peak memory usage
-- Throughput
 - Perplexity
-- Long-context benchmark performance
-- Quality degradation at different cache budgets
+- Needle-in-a-Haystack retrieval
+- Quality-vs-memory curves across many budgets
 
-These measurements are planned for the benchmarking stage.
+Those belong to later stages.
+
+---
+
+# Stage 8 — Benchmark Infrastructure
+
+Run a single policy:
+
+    python benchmark.py --policy sliding --budget 128
+    python benchmark.py --policy streaming --budget 128
+    python benchmark.py --policy h2o --budget 128
+
+Run all three policies under one budget:
+
+    python benchmark.py --all --budget 128
+
+The script writes `results/benchmark_summary.json` and
+`results/benchmark_raw.csv`. Each run records model, Python/PyTorch/
+Transformers versions, hardware, CUDA availability, context length, cache
+budget, policy, wall-clock time, and peak memory.
+
+On CPU, peak memory is process RSS (`ru_maxrss`), not isolated KV-cache
+bytes. CUDA peak allocation is recorded when CUDA is available.
 
 ---
 
 # Next Stage
 
-## Stage 8 — Benchmarking and Evaluation
+## Stage 9 — Perplexity and Needle-in-a-Haystack
 
-The next stage will introduce quantitative experiments comparing:
-
-- Baseline full KV cache
-- Sliding Window
-- StreamingLLM-style attention sinks
-- H2O heavy hitters
-
-Planned measurements include:
-
-- Cache budget
-- Compression ratio
-- Generation latency
-- Memory usage
-- Generation behavior
-- Comparative results across multiple cache budgets
-
-The goal is to move from:
-
-    Correct implementation
-            ↓
-    Correctness validation
-            ↓
-    Quantitative evaluation
+Quality evaluation under a fixed cache budget.

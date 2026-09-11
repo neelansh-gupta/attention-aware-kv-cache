@@ -17,12 +17,9 @@ behavior, and Task 3 in `postman_25.pdf`.
 | Stage 5 | COMPLETE | Sinks + recent + accumulated-score heavy hitters |
 | Stage 6 | COMPLETE | Real Qwen non-contiguous middle-eviction regression |
 | Stage 7 | COMPLETE | Public categorized A/B/C/D correctness entry point |
+| Stage 8 | COMPLETE | `benchmark.py` CLI, hardware logging, measured JSON/CSV |
 
-**Next available stage:** Stage 8, only when explicitly requested.
-
-No Stage 8+ functionality was implemented during this repair. Existing
-untracked `benchmark.py` and `results/benchmark_*` predate this repair and are
-not used as evidence here.
+**Next available stage:** Stage 9, only when explicitly requested.
 
 ## Verified environment
 
@@ -149,6 +146,7 @@ python test_heavy_hitter.py
 python test_position_handling.py
 python test_correctness_harness.py
 python test_correctness.py
+python benchmark.py --all --budget 32 --max-new-tokens 4
 ```
 
 ## Known limitations
@@ -160,8 +158,47 @@ python test_correctness.py
   Qwen2, not every historical/custom RoPE implementation.
 - Stage 7's four-token agreement is descriptive smoke data, not perplexity,
   Needle-in-a-Haystack, or a benchmark.
-- Perplexity, NIH, benchmark infrastructure, quality-vs-memory curves, and the
-  final 2–4 page writeup belong to Stages 8–11 and remain incomplete.
+- Perplexity, NIH, quality-vs-memory curves, and the final 2–4 page writeup
+  belong to Stages 9–11 and remain incomplete.
+- Stage 8 CPU peak memory is process RSS, not isolated KV-cache size. CUDA was
+  unavailable during the measured run (`cuda_available: false`).
+
+## Stage 8 benchmark infrastructure
+
+CLI:
+
+```bash
+python benchmark.py --policy sliding --budget 128
+python benchmark.py --policy streaming --budget 128
+python benchmark.py --policy h2o --budget 128
+python benchmark.py --all --budget 128
+```
+
+Verified command:
+
+```bash
+python benchmark.py --all --budget 32 --max-new-tokens 4
+```
+
+Measured CPU result (do not treat as a quality benchmark):
+
+```text
+prompt tokens: 31
+generated tokens: 4
+cache budget: 32
+sliding:   0.843s, cache_length=32, peak_memory_mib=1762.14 (ru_maxrss)
+streaming: 0.768s, cache_length=32, peak_memory_mib=1762.14 (ru_maxrss)
+h2o:       0.784s, cache_length=32, peak_memory_mib=1762.14 (ru_maxrss)
+Python 3.14.4, torch 2.14.0+cu130, transformers 5.16.1
+CUDA available: False
+```
+
+Artifacts:
+
+```text
+results/benchmark_summary.json
+results/benchmark_raw.csv
+```
 
 ## Phase 1 audit status
 
@@ -176,4 +213,5 @@ Stage 4: COMPLETE
 Stage 5: COMPLETE
 Stage 6: COMPLETE
 Stage 7: COMPLETE
+Stage 8: COMPLETE
 ```
