@@ -12,6 +12,12 @@ from .cache_manager import (
     SlidingWindowCacheManager,
 )
 
+from .position_utils import (
+    build_absolute_position_ids,
+    build_cache_position,
+    ensure_rope_cache_length,
+)
+
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-0.5B"
 
@@ -49,6 +55,7 @@ class ModelWrapper:
             - Tokenization
             - Incremental generation
             - KV-cache inspection
+
         Stage 2:
             - Attention extraction
             - Attention aggregation
@@ -59,13 +66,14 @@ class ModelWrapper:
 
         Stage 4:
             - StreamingLLM-style attention-sink-aware KV-cache eviction
-        
+
         Stage 5:
             - H2O-style accumulated-attention heavy-hitter KV-cache eviction
 
-    Note:
-        Correct RoPE/position handling after cache eviction is
-        intentionally deferred to Stage 6.
+        Stage 6:
+            - Absolute position tracking after KV-cache eviction
+            - Correct position_ids for continued generation
+            - RoPE cache extension for legacy implementations
     """
 
     def __init__(
@@ -312,7 +320,6 @@ class ModelWrapper:
         First average over heads, then average over layers.
 
         The resulting matrix has shape:
-
             [sequence_length, sequence_length]
         """
 
@@ -324,6 +331,7 @@ class ModelWrapper:
         layer_attention = []
 
         for attention in attentions:
+
             if attention.dim() != 4:
                 raise ValueError(
                     "Expected attention tensor with shape "
@@ -458,9 +466,11 @@ class ModelWrapper:
             - Keeps only the most recent `window_size` entries.
             - Does not convert the cache to the legacy tuple format.
 
-        Important:
-            Correct RoPE/position handling after eviction is
-            intentionally deferred to Stage 6.
+        Stage 6:
+            - Tracks absolute token positions independently
+              from the physical cache length.
+            - Continues using the original sequence positions
+              after cache eviction.
         """
 
         if window_size <= 0:
@@ -480,6 +490,12 @@ class ModelWrapper:
         past_key_values = None
         generated_ids = input_ids.clone()
 
+        # Absolute position in the original sequence.
+        #
+        # This must not shrink when the physical KV cache
+        # is cropped.
+        next_position = 0
+
         for _ in range(max_new_tokens):
 
             if past_key_values is None:
@@ -487,12 +503,38 @@ class ModelWrapper:
             else:
                 current_input_ids = generated_ids[:, -1:]
 
-            position_ids = (
-                attention_mask.cumsum(dim=-1) - 1
-            )
+            if past_key_values is None:
 
-            if past_key_values is not None:
-                position_ids = position_ids[:, -1:]
+                position_ids = build_absolute_position_ids(
+                    start_position=0,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+                cache_position = build_cache_position(
+                    start_position=0,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+            else:
+
+                position_ids = build_absolute_position_ids(
+                    start_position=next_position,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+                cache_position = build_cache_position(
+                    start_position=next_position,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+            ensure_rope_cache_length(
+                self.model,
+                int(position_ids.max().item()) + 1,
+            )
 
             kwargs = {
                 "input_ids": current_input_ids,
@@ -505,12 +547,7 @@ class ModelWrapper:
             try:
                 outputs = self.model(
                     **kwargs,
-                    cache_position=torch.arange(
-                        attention_mask.shape[-1]
-                        - current_input_ids.shape[-1],
-                        attention_mask.shape[-1],
-                        device=self.device,
-                    ),
+                    cache_position=cache_position,
                 )
             except (TypeError, ValueError):
                 outputs = self.model(**kwargs)
@@ -540,6 +577,10 @@ class ModelWrapper:
                 ],
                 dim=-1,
             )
+
+            # The next generated token belongs to the next
+            # absolute position in the original sequence.
+            next_position += current_input_ids.shape[-1]
 
             # Keep the native Hugging Face DynamicCache.
             past_key_values = outputs.past_key_values
@@ -597,9 +638,10 @@ class ModelWrapper:
             - the first `sink_tokens` tokens
             - the most recent tokens filling the remaining budget
 
-        Important:
-            Correct RoPE/position handling after eviction is intentionally
-            deferred to Stage 6.
+        Stage 6:
+            Absolute position IDs continue increasing after
+            cache eviction instead of being recomputed from
+            the shortened attention mask.
         """
 
         if cache_budget <= 0:
@@ -630,6 +672,9 @@ class ModelWrapper:
         past_key_values = None
         generated_ids = input_ids.clone()
 
+        # Absolute position in the original sequence.
+        next_position = 0
+
         for _ in range(max_new_tokens):
 
             if past_key_values is None:
@@ -637,12 +682,38 @@ class ModelWrapper:
             else:
                 current_input_ids = generated_ids[:, -1:]
 
-            position_ids = (
-                attention_mask.cumsum(dim=-1) - 1
-            )
+            if past_key_values is None:
 
-            if past_key_values is not None:
-                position_ids = position_ids[:, -1:]
+                position_ids = build_absolute_position_ids(
+                    start_position=0,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+                cache_position = build_cache_position(
+                    start_position=0,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+            else:
+
+                position_ids = build_absolute_position_ids(
+                    start_position=next_position,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+                cache_position = build_cache_position(
+                    start_position=next_position,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+            ensure_rope_cache_length(
+                self.model,
+                int(position_ids.max().item()) + 1,
+            )
 
             kwargs = {
                 "input_ids": current_input_ids,
@@ -655,12 +726,7 @@ class ModelWrapper:
             try:
                 outputs = self.model(
                     **kwargs,
-                    cache_position=torch.arange(
-                        attention_mask.shape[-1]
-                        - current_input_ids.shape[-1],
-                        attention_mask.shape[-1],
-                        device=self.device,
-                    ),
+                    cache_position=cache_position,
                 )
             except (TypeError, ValueError):
                 outputs = self.model(**kwargs)
@@ -690,6 +756,10 @@ class ModelWrapper:
                 ],
                 dim=-1,
             )
+
+            # Continue absolute positions independently
+            # from the physical cache length.
+            next_position += current_input_ids.shape[-1]
 
             past_key_values = outputs.past_key_values
 
@@ -723,7 +793,6 @@ class ModelWrapper:
             skip_special_tokens=True,
         )
 
-
     # ------------------------------------------------------------------
     # Stage 5: H2O / heavy-hitter generation
     # ------------------------------------------------------------------
@@ -743,9 +812,9 @@ class ModelWrapper:
         the tokens with the highest accumulated attention scores are
         retained.
 
-        Important:
-            Correct RoPE/position handling after non-contiguous
-            eviction is intentionally deferred to Stage 6.
+        Stage 6:
+            Absolute position IDs are preserved across
+            non-contiguous heavy-hitter eviction.
         """
 
         if cache_budget <= 0:
@@ -767,6 +836,13 @@ class ModelWrapper:
 
         accumulated_scores = None
 
+        # Absolute position in the original sequence.
+        #
+        # Heavy-hitter eviction may remove arbitrary tokens,
+        # so this value must remain independent of the
+        # physical cache length.
+        next_position = 0
+
         for _ in range(max_new_tokens):
 
             if past_key_values is None:
@@ -776,12 +852,38 @@ class ModelWrapper:
                     generated_ids[:, -1:]
                 )
 
-            position_ids = (
-                attention_mask.cumsum(dim=-1) - 1
-            )
+            if past_key_values is None:
 
-            if past_key_values is not None:
-                position_ids = position_ids[:, -1:]
+                position_ids = build_absolute_position_ids(
+                    start_position=0,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+                cache_position = build_cache_position(
+                    start_position=0,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+            else:
+
+                position_ids = build_absolute_position_ids(
+                    start_position=next_position,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+                cache_position = build_cache_position(
+                    start_position=next_position,
+                    sequence_length=current_input_ids.shape[-1],
+                    device=self.device,
+                )
+
+            ensure_rope_cache_length(
+                self.model,
+                int(position_ids.max().item()) + 1,
+            )
 
             kwargs = {
                 "input_ids": current_input_ids,
@@ -795,12 +897,7 @@ class ModelWrapper:
             try:
                 outputs = self.model(
                     **kwargs,
-                    cache_position=torch.arange(
-                        attention_mask.shape[-1]
-                        - current_input_ids.shape[-1],
-                        attention_mask.shape[-1],
-                        device=self.device,
-                    ),
+                    cache_position=cache_position,
                 )
             except (TypeError, ValueError):
                 outputs = self.model(**kwargs)
@@ -870,10 +967,13 @@ class ModelWrapper:
             # ----------------------------------------------------------
 
             if accumulated_scores is None:
+
                 accumulated_scores = (
                     current_attention.clone()
                 )
+
             else:
+
                 previous_length = (
                     accumulated_scores.shape[0]
                 )
@@ -881,6 +981,7 @@ class ModelWrapper:
                 if current_attention.shape[0] == (
                     previous_length + 1
                 ):
+
                     # Existing cached tokens receive their
                     # newly accumulated attention.
                     accumulated_scores = (
@@ -903,6 +1004,7 @@ class ModelWrapper:
                     )
 
                 elif current_attention.shape[0] == previous_length:
+
                     # Some Hugging Face cache implementations may
                     # expose attention only over the existing cache.
                     accumulated_scores = (
@@ -927,6 +1029,10 @@ class ModelWrapper:
                 ],
                 dim=-1,
             )
+
+            # Continue absolute positions independently
+            # from the shortened physical cache.
+            next_position += current_input_ids.shape[-1]
 
             past_key_values = outputs.past_key_values
 
@@ -972,6 +1078,7 @@ class ModelWrapper:
             skip_special_tokens=True,
         )
 
+
 # ----------------------------------------------------------------------
 # Smoke test
 # ----------------------------------------------------------------------
@@ -991,13 +1098,16 @@ def main():
     print("Device:", wrapper.device)
 
     print("\nIncremental generation:")
+
     result = wrapper.incremental_generate(
         prompt,
         max_new_tokens=16,
     )
+
     print(result)
 
     print("\nAttention analysis:")
+
     attentions, token_info = (
         wrapper.inspect_attention(
             prompt
@@ -1019,6 +1129,7 @@ def main():
     )
 
     print("\nAttention sink analysis:")
+
     sink_analysis = (
         wrapper.analyze_attention_sinks(
             attentions
