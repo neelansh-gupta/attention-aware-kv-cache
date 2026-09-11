@@ -6,6 +6,7 @@ from typing import Any, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from .cache_utils import cache_as_tensor_tuple
 from .cache_manager import (
     AttentionSinkCacheManager,
     HeavyHitterCacheManager,
@@ -15,7 +16,6 @@ from .cache_manager import (
 from .position_utils import (
     build_absolute_position_ids,
     build_cache_position,
-    ensure_rope_cache_length,
 )
 
 
@@ -30,6 +30,7 @@ class CacheInfo:
 
     num_layers: int
     sequence_length: int
+    cache_type: str
     key_shape: tuple
     value_shape: tuple
 
@@ -43,6 +44,59 @@ class AttentionAnalysis:
     attention_received: torch.Tensor
     early_token_attention: torch.Tensor
     most_attended_token: int
+    attention_matrix: torch.Tensor
+    attention_by_layer: tuple[torch.Tensor, ...]
+    attention_by_head: torch.Tensor
+
+
+@dataclass
+class GenerationResult:
+    """Generation text plus cache diagnostics used by correctness tests."""
+
+    text: str
+    generated_token_ids: list[int]
+    cache_length: int
+    retained_positions: list[int]
+    score_updates: int = 0
+
+
+def aggregate_newest_attention(attentions: Any) -> torch.Tensor:
+    """Average the newest query's attention across layers and heads."""
+
+    if attentions is None or len(attentions) == 0:
+        raise ValueError("No attention tensors were provided.")
+    per_layer = []
+    for layer_attention in attentions:
+        if layer_attention.dim() != 4:
+            raise ValueError(
+                "Expected attention tensor with shape [batch, heads, query, key]."
+            )
+        per_layer.append(layer_attention[:, :, -1, :].float().mean(dim=1)[0])
+    return torch.stack(per_layer).mean(dim=0)
+
+
+def update_accumulated_scores(
+    accumulated_scores: torch.Tensor | None,
+    current_attention: torch.Tensor,
+) -> torch.Tensor:
+    """Add one decode step while initializing any newly cached token."""
+
+    current_attention = current_attention.flatten()
+    if accumulated_scores is None:
+        return current_attention.clone()
+    previous_length = accumulated_scores.numel()
+    if current_attention.numel() == previous_length + 1:
+        return torch.cat(
+            (
+                accumulated_scores + current_attention[:previous_length],
+                current_attention[previous_length:],
+            )
+        )
+    if current_attention.numel() == previous_length:
+        return accumulated_scores + current_attention
+    raise ValueError(
+        "Attention sequence length does not match the tracked KV-cache length."
+    )
 
 
 class ModelWrapper:
@@ -73,7 +127,7 @@ class ModelWrapper:
         Stage 6:
             - Absolute position tracking after KV-cache eviction
             - Correct position_ids for continued generation
-            - RoPE cache extension for legacy implementations
+            - Preserve already-rotated cached keys at original positions
     """
 
     def __init__(
@@ -136,7 +190,8 @@ class ModelWrapper:
         self,
         prompt: str,
         max_new_tokens: int = 32,
-    ) -> str:
+        return_diagnostics: bool = False,
+    ) -> str | GenerationResult:
         """
         Generate tokens incrementally using the model's KV cache.
         """
@@ -222,10 +277,24 @@ class ModelWrapper:
             ):
                 break
 
-        return self.tokenizer.decode(
+        text = self.tokenizer.decode(
             generated_ids[0],
             skip_special_tokens=True,
         )
+        if return_diagnostics:
+            cache_length = (
+                0 if past_key_values is None
+                else int(past_key_values.get_seq_length())
+                if hasattr(past_key_values, "get_seq_length")
+                else int(past_key_values[0][0].shape[-2])
+            )
+            return GenerationResult(
+                text=text,
+                generated_token_ids=generated_ids[0, input_ids.shape[-1] :].tolist(),
+                cache_length=cache_length,
+                retained_positions=list(range(cache_length)),
+            )
+        return text
 
     # ------------------------------------------------------------------
     # Cache inspection
@@ -242,23 +311,23 @@ class ModelWrapper:
         if past_key_values is None:
             return None
 
-        legacy_cache = self._cache_to_legacy(
-            past_key_values
-        )
+        cache_layers = cache_as_tensor_tuple(past_key_values)
 
-        if legacy_cache is None or len(legacy_cache) == 0:
+        if len(cache_layers) == 0:
             return CacheInfo(
                 num_layers=0,
                 sequence_length=0,
+                cache_type=type(past_key_values).__name__,
                 key_shape=(),
                 value_shape=(),
             )
 
-        first_key, first_value = legacy_cache[0]
+        first_key, first_value = cache_layers[0]
 
         return CacheInfo(
-            num_layers=len(legacy_cache),
+            num_layers=len(cache_layers),
             sequence_length=first_key.shape[-2],
+            cache_type=type(past_key_values).__name__,
             key_shape=tuple(first_key.shape),
             value_shape=tuple(first_value.shape),
         )
@@ -329,6 +398,7 @@ class ModelWrapper:
             )
 
         layer_attention = []
+        attention_by_layer = []
 
         for attention in attentions:
 
@@ -338,9 +408,9 @@ class ModelWrapper:
                     "[batch, heads, query, key]."
                 )
 
-            averaged_heads = attention.mean(
-                dim=1
-            )
+            layer = attention[0].detach().float().cpu()
+            attention_by_layer.append(layer)
+            averaged_heads = layer.mean(dim=0)
 
             layer_attention.append(
                 averaged_heads
@@ -350,8 +420,6 @@ class ModelWrapper:
             layer_attention,
             dim=0,
         ).mean(dim=0)
-
-        attention_matrix = attention_matrix[0]
 
         attention_received = attention_matrix.sum(
             dim=0
@@ -379,12 +447,15 @@ class ModelWrapper:
             attention_received=attention_received,
             early_token_attention=early_token_attention,
             most_attended_token=most_attended_token,
+            attention_matrix=attention_matrix,
+            attention_by_layer=tuple(attention_by_layer),
+            attention_by_head=torch.stack(attention_by_layer).mean(dim=0),
         )
 
     def analyze_attention_sinks(
         self,
         attentions,
-        early_token_count: int = 5,
+        token_counts: tuple[int, ...] = (1, 2, 4, 8),
     ) -> dict[str, Any]:
         """
         Analyze how much attention is received by early tokens.
@@ -401,49 +472,29 @@ class ModelWrapper:
             attentions
         )
 
-        sequence_length = (
-            analysis.attention_received.shape[-1]
-        )
-
-        early_token_count = min(
-            early_token_count,
-            sequence_length,
-        )
-
-        early_attention = (
-            analysis.attention_received[
-                :early_token_count
-            ]
-        )
-
-        total_attention = (
-            analysis.attention_received.sum()
-        )
-
-        if total_attention.item() == 0:
-            early_fraction = torch.tensor(
-                0.0,
-                device=total_attention.device,
-            )
-        else:
-            early_fraction = (
-                early_attention.sum()
-                / total_attention
-            )
+        sequence_length = int(analysis.attention_received.shape[-1])
+        total_attention = analysis.attention_received.sum().item()
+        early_fractions: dict[int, float | None] = {}
+        for count in token_counts:
+            if count <= 0:
+                raise ValueError("token_counts must contain positive integers.")
+            if sequence_length < count:
+                early_fractions[count] = None
+            elif total_attention == 0:
+                early_fractions[count] = 0.0
+            else:
+                early_fractions[count] = float(
+                    analysis.attention_received[:count].sum().item()
+                    / total_attention
+                )
 
         return {
-            "attention_received": (
-                analysis.attention_received
-            ),
-            "early_token_attention": (
-                early_attention
-            ),
-            "early_token_fraction": (
-                early_fraction
-            ),
-            "most_attended_token": (
-                analysis.most_attended_token
-            ),
+            "analysis": analysis,
+            "sequence_length": sequence_length,
+            "attention_received": analysis.attention_received,
+            "early_token_attention": early_fractions,
+            "most_attended_token": analysis.most_attended_token,
+            "most_attended_token_position": analysis.most_attended_token,
         }
 
     # ------------------------------------------------------------------
@@ -456,7 +507,8 @@ class ModelWrapper:
         prompt: str,
         max_new_tokens: int = 32,
         window_size: int = 128,
-    ) -> str:
+        return_diagnostics: bool = False,
+    ) -> str | GenerationResult:
         """
         Generate tokens while enforcing a fixed-size
         sliding-window KV-cache budget.
@@ -489,6 +541,7 @@ class ModelWrapper:
 
         past_key_values = None
         generated_ids = input_ids.clone()
+        cache_positions = torch.empty(0, dtype=torch.long)
 
         # Absolute position in the original sequence.
         #
@@ -530,11 +583,6 @@ class ModelWrapper:
                     sequence_length=current_input_ids.shape[-1],
                     device=self.device,
                 )
-
-            ensure_rope_cache_length(
-                self.model,
-                int(position_ids.max().item()) + 1,
-            )
 
             kwargs = {
                 "input_ids": current_input_ids,
@@ -584,12 +632,17 @@ class ModelWrapper:
 
             # Keep the native Hugging Face DynamicCache.
             past_key_values = outputs.past_key_values
+            step_positions = torch.cat(
+                (cache_positions, position_ids[0].detach().cpu())
+            )
 
             # Enforce the sliding-window budget using
             # DynamicCache.crop().
             past_key_values = manager.update(
-                past_key_values
+                past_key_values,
+                token_positions=step_positions,
             )
+            cache_positions = manager.retained_positions
 
             # The mask must correspond to the retained cache
             # plus the current/new token.
@@ -614,10 +667,18 @@ class ModelWrapper:
             ):
                 break
 
-        return self.tokenizer.decode(
+        text = self.tokenizer.decode(
             generated_ids[0],
             skip_special_tokens=True,
         )
+        if return_diagnostics:
+            return GenerationResult(
+                text=text,
+                generated_token_ids=generated_ids[0, input_ids.shape[-1] :].tolist(),
+                cache_length=manager.sequence_length(past_key_values),
+                retained_positions=cache_positions.tolist(),
+            )
+        return text
 
     # ------------------------------------------------------------------
     # Stage 4: StreamingLLM / attention-sink-aware generation
@@ -630,7 +691,8 @@ class ModelWrapper:
         max_new_tokens: int = 32,
         cache_budget: int = 128,
         sink_tokens: int = 4,
-    ) -> str:
+        return_diagnostics: bool = False,
+    ) -> str | GenerationResult:
         """
         Generate tokens using a StreamingLLM-style KV-cache policy.
 
@@ -671,6 +733,7 @@ class ModelWrapper:
 
         past_key_values = None
         generated_ids = input_ids.clone()
+        cache_positions = torch.empty(0, dtype=torch.long)
 
         # Absolute position in the original sequence.
         next_position = 0
@@ -709,11 +772,6 @@ class ModelWrapper:
                     sequence_length=current_input_ids.shape[-1],
                     device=self.device,
                 )
-
-            ensure_rope_cache_length(
-                self.model,
-                int(position_ids.max().item()) + 1,
-            )
 
             kwargs = {
                 "input_ids": current_input_ids,
@@ -762,10 +820,15 @@ class ModelWrapper:
             next_position += current_input_ids.shape[-1]
 
             past_key_values = outputs.past_key_values
+            step_positions = torch.cat(
+                (cache_positions, position_ids[0].detach().cpu())
+            )
 
             past_key_values = manager.update(
-                past_key_values
+                past_key_values,
+                token_positions=step_positions,
             )
+            cache_positions = manager.retained_positions
 
             cache_length = manager.sequence_length(
                 past_key_values
@@ -788,10 +851,18 @@ class ModelWrapper:
             ):
                 break
 
-        return self.tokenizer.decode(
+        text = self.tokenizer.decode(
             generated_ids[0],
             skip_special_tokens=True,
         )
+        if return_diagnostics:
+            return GenerationResult(
+                text=text,
+                generated_token_ids=generated_ids[0, input_ids.shape[-1] :].tolist(),
+                cache_length=manager.sequence_length(past_key_values),
+                retained_positions=cache_positions.tolist(),
+            )
+        return text
 
     # ------------------------------------------------------------------
     # Stage 5: H2O / heavy-hitter generation
@@ -803,7 +874,10 @@ class ModelWrapper:
         prompt: str,
         max_new_tokens: int = 32,
         cache_budget: int = 128,
-    ) -> str:
+        sink_tokens: int = 1,
+        recent_window: int = 1,
+        return_diagnostics: bool = False,
+    ) -> str | GenerationResult:
         """
         Generate tokens using an H2O-style heavy-hitter KV-cache policy.
 
@@ -828,13 +902,17 @@ class ModelWrapper:
         attention_mask = inputs["attention_mask"]
 
         manager = HeavyHitterCacheManager(
-            cache_budget=cache_budget
+            cache_budget=cache_budget,
+            sink_tokens=sink_tokens,
+            recent_window=recent_window,
         )
 
         past_key_values = None
         generated_ids = input_ids.clone()
 
         accumulated_scores = None
+        score_updates = 0
+        cache_positions = torch.empty(0, dtype=torch.long)
 
         # Absolute position in the original sequence.
         #
@@ -880,11 +958,6 @@ class ModelWrapper:
                     device=self.device,
                 )
 
-            ensure_rope_cache_length(
-                self.model,
-                int(position_ids.max().item()) + 1,
-            )
-
             kwargs = {
                 "input_ids": current_input_ids,
                 "attention_mask": attention_mask,
@@ -926,97 +999,11 @@ class ModelWrapper:
                     "the model did not return them."
                 )
 
-            current_attention = []
-
-            for layer_attention in outputs.attentions:
-
-                if layer_attention.dim() != 4:
-                    raise ValueError(
-                        "Expected attention tensor with shape "
-                        "[batch, heads, query, key]."
-                    )
-
-                # We only need the attention generated by the
-                # newest query token.
-                newest_attention = (
-                    layer_attention[:, :, -1, :]
-                )
-
-                # Average across attention heads.
-                newest_attention = (
-                    newest_attention.mean(dim=1)
-                )
-
-                # Batch size is one for this generation path.
-                newest_attention = (
-                    newest_attention[0]
-                )
-
-                current_attention.append(
-                    newest_attention
-                )
-
-            # Average attention across layers.
-            current_attention = torch.stack(
-                current_attention,
-                dim=0,
-            ).mean(dim=0)
-
-            # ----------------------------------------------------------
-            # The attention vector includes the newly generated token.
-            # ----------------------------------------------------------
-
-            if accumulated_scores is None:
-
-                accumulated_scores = (
-                    current_attention.clone()
-                )
-
-            else:
-
-                previous_length = (
-                    accumulated_scores.shape[0]
-                )
-
-                if current_attention.shape[0] == (
-                    previous_length + 1
-                ):
-
-                    # Existing cached tokens receive their
-                    # newly accumulated attention.
-                    accumulated_scores = (
-                        accumulated_scores
-                        + current_attention[
-                            :previous_length
-                        ]
-                    )
-
-                    # The newly generated token starts with
-                    # the attention it received at this step.
-                    accumulated_scores = torch.cat(
-                        [
-                            accumulated_scores,
-                            current_attention[
-                                previous_length:
-                            ],
-                        ],
-                        dim=0,
-                    )
-
-                elif current_attention.shape[0] == previous_length:
-
-                    # Some Hugging Face cache implementations may
-                    # expose attention only over the existing cache.
-                    accumulated_scores = (
-                        accumulated_scores
-                        + current_attention
-                    )
-
-                else:
-                    raise ValueError(
-                        "Attention sequence length does not "
-                        "match the tracked KV-cache length."
-                    )
+            current_attention = aggregate_newest_attention(outputs.attentions)
+            accumulated_scores = update_accumulated_scores(
+                accumulated_scores, current_attention
+            )
+            score_updates += 1
 
             attention_mask = torch.cat(
                 [
@@ -1035,6 +1022,9 @@ class ModelWrapper:
             next_position += current_input_ids.shape[-1]
 
             past_key_values = outputs.past_key_values
+            step_positions = torch.cat(
+                (cache_positions, position_ids[0].detach().cpu())
+            )
 
             # ----------------------------------------------------------
             # Enforce the heavy-hitter cache budget.
@@ -1044,8 +1034,10 @@ class ModelWrapper:
                 manager.update(
                     past_key_values,
                     accumulated_scores,
+                    token_positions=step_positions,
                 )
             )
+            cache_positions = manager.retained_positions
 
             cache_length = manager.sequence_length(
                 past_key_values
@@ -1073,10 +1065,19 @@ class ModelWrapper:
             ):
                 break
 
-        return self.tokenizer.decode(
+        text = self.tokenizer.decode(
             generated_ids[0],
             skip_special_tokens=True,
         )
+        if return_diagnostics:
+            return GenerationResult(
+                text=text,
+                generated_token_ids=generated_ids[0, input_ids.shape[-1] :].tolist(),
+                cache_length=manager.sequence_length(past_key_values),
+                retained_positions=cache_positions.tolist(),
+                score_updates=score_updates,
+            )
+        return text
 
 
 # ----------------------------------------------------------------------
@@ -1096,6 +1097,35 @@ def main():
 
     print("Model:", wrapper.model_name)
     print("Device:", wrapper.device)
+    config = wrapper.model.config
+    num_heads = int(config.num_attention_heads)
+    head_dim = int(
+        getattr(config, "head_dim", config.hidden_size // num_heads)
+    )
+    print("Transformer layers:", config.num_hidden_layers)
+    print("Attention heads:", num_heads)
+    print("KV heads:", getattr(config, "num_key_value_heads", num_heads))
+    print("Head dimension:", head_dim)
+
+    smoke_inputs = wrapper.tokenize(prompt)
+    with torch.no_grad():
+        smoke_outputs = wrapper.model(
+            **smoke_inputs,
+            use_cache=True,
+            output_attentions=True,
+        )
+    cache_info = wrapper.inspect_cache(smoke_outputs.past_key_values)
+    if cache_info is not None:
+        print("Cache type:", cache_info.cache_type)
+        print("Cache layers:", cache_info.num_layers)
+        print("Cache sequence length:", cache_info.sequence_length)
+        print("Key tensor shape:", cache_info.key_shape)
+        print("Value tensor shape:", cache_info.value_shape)
+    if smoke_outputs.attentions:
+        print(
+            "Attention tensor shape:",
+            tuple(smoke_outputs.attentions[0].shape),
+        )
 
     print("\nIncremental generation:")
 
@@ -1136,12 +1166,10 @@ def main():
         )
     )
 
-    print(
-        "Early-token attention fraction:",
-        sink_analysis[
-            "early_token_fraction"
-        ].item(),
-    )
+    print("Attention received by earliest tokens:")
+    for count, fraction in sink_analysis["early_token_attention"].items():
+        value = "unavailable" if fraction is None else f"{fraction:.6f}"
+        print(f"  first {count}: {value}")
 
 
 if __name__ == "__main__":
