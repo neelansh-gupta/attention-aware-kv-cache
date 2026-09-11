@@ -39,6 +39,11 @@ from src.position_utils import (
     build_absolute_position_ids,
     build_cache_position,
 )
+from src.model_wrapper import (
+    ModelWrapper,
+    aggregate_newest_attention,
+    update_accumulated_scores,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -321,19 +326,19 @@ def test_heavy_hitter_exact_selection():
     )
 
     assert extract_key_positions(result) == [
+        0,
         1,
         3,
         5,
-        6,
-        8,
+        9,
     ]
 
     assert extract_value_positions(result) == [
+        0,
         1,
         3,
         5,
-        6,
-        8,
+        9,
     ]
 
     assert_cache_integrity(result, 5)
@@ -362,9 +367,9 @@ def test_heavy_hitter_preserves_original_order():
     )
 
     assert extract_key_positions(result) == [
+        0,
         1,
         3,
-        5,
         7,
     ]
 
@@ -408,8 +413,8 @@ def test_heavy_hitter_accepts_batched_scores():
     )
 
     assert extract_key_positions(result) == [
+        0,
         1,
-        3,
         5,
     ]
 
@@ -493,16 +498,16 @@ def test_heavy_hitter_manager_and_score_alignment():
     assert manager.sequence_length(result) == 4
 
     assert extract_key_positions(result) == [
+        0,
         1,
         3,
-        5,
         7,
     ]
 
     assert torch.equal(
         updated_scores,
         torch.tensor(
-            [0.9, 0.8, 0.7, 0.6]
+            [0.1, 0.9, 0.8, 0.6]
         ),
     )
 
@@ -530,15 +535,15 @@ def test_heavy_hitter_manager_accepts_batched_scores():
     )
 
     assert extract_key_positions(result) == [
+        0,
         1,
-        3,
         5,
     ]
 
     assert torch.equal(
         updated_scores,
         torch.tensor(
-            [0.9, 0.8, 0.7]
+            [0.1, 0.9, 0.7]
         ),
     )
 
@@ -667,6 +672,47 @@ def test_absolute_cache_position():
     assert cache_position.tolist() == [15]
 
 
+def test_explicit_original_position_metadata():
+    positions = list(range(10))
+    sliding = SlidingWindowCacheManager(4)
+    sliding.update(make_legacy_cache(10), positions)
+    assert sliding.retained_positions.tolist() == [6, 7, 8, 9]
+
+    streaming = AttentionSinkCacheManager(6, 2)
+    streaming.update(make_legacy_cache(10), positions)
+    assert streaming.retained_positions.tolist() == [0, 1, 6, 7, 8, 9]
+
+
+def test_h2o_reserves_sinks_recent_and_heavy_hitters():
+    scores = torch.tensor([0.0, 0.1, 0.2, 0.9, 0.3, 0.8, 0.4, 0.5, 0.0, 0.0])
+    manager = HeavyHitterCacheManager(5, sink_tokens=1, recent_window=2)
+    cache, retained_scores = manager.update(
+        make_legacy_cache(10), scores, list(range(10))
+    )
+    assert extract_key_positions(cache) == [0, 3, 5, 8, 9]
+    assert manager.retained_positions.tolist() == [0, 3, 5, 8, 9]
+    assert torch.equal(retained_scores, scores[[0, 3, 5, 8, 9]])
+
+
+def test_attention_aggregation_and_score_updates():
+    layer1 = torch.tensor([[[[0.1, 0.2]], [[0.3, 0.4]]]])
+    layer2 = torch.tensor([[[[0.2, 0.4]], [[0.4, 0.2]]]])
+    current = aggregate_newest_attention((layer1, layer2))
+    assert torch.allclose(current, torch.tensor([0.25, 0.3]))
+    first = update_accumulated_scores(None, current)
+    second = update_accumulated_scores(first, torch.tensor([0.1, 0.2, 0.7]))
+    assert torch.allclose(second, torch.tensor([0.35, 0.5, 0.7]))
+
+
+def test_short_attention_prefix_is_unavailable():
+    wrapper = object.__new__(ModelWrapper)
+    attention = torch.full((1, 2, 4, 4), 0.25)
+    report = wrapper.analyze_attention_sinks((attention,))
+    assert report["early_token_attention"][1] is not None
+    assert report["early_token_attention"][4] is not None
+    assert report["early_token_attention"][8] is None
+
+
 # ---------------------------------------------------------------------------
 # Harness entry point
 # ---------------------------------------------------------------------------
@@ -693,6 +739,10 @@ def run_all_tests():
         test_invalid_heavy_hitter_score_shape,
         test_absolute_positions_continue_after_eviction,
         test_absolute_cache_position,
+        test_explicit_original_position_metadata,
+        test_h2o_reserves_sinks_recent_and_heavy_hitters,
+        test_attention_aggregation_and_score_updates,
+        test_short_attention_prefix_is_unavailable,
     ]
 
     for test in tests:

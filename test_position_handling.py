@@ -1,9 +1,14 @@
-import torch
+import inspect
 
+import torch
+from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention
+
+from src.cache_manager import AttentionSinkCacheManager
+from src.cache_utils import cache_as_tensor_tuple
+from src.model_wrapper import ModelWrapper
 from src.position_utils import (
     build_absolute_position_ids,
     build_cache_position,
-    ensure_rope_cache_length,
 )
 
 
@@ -52,100 +57,67 @@ def test_cache_positions_are_absolute():
     assert cache_position.tolist() == [15]
 
 
-class FakeRotaryEmbedding:
-    def __init__(self):
-        self.max_seq_len_cached = 8
-        self.inv_freq = torch.ones(
-            4,
-            dtype=torch.float32,
-        )
-        self.calls = []
+def test_qwen_applies_rope_before_cache_update():
+    source = inspect.getsource(Qwen2Attention.forward)
+    assert source.index("apply_rotary_pos_emb") < source.index("past_key_values.update")
 
-    def _set_cos_sin_cache(
-        self,
-        seq_len,
-        device,
-        dtype,
+
+def test_model_level_middle_eviction_preserves_positions():
+    wrapper = ModelWrapper(device="cpu")
+    tokenized = wrapper.tokenize(
+        "zero one two three four five six seven eight nine ten eleven"
+    )
+    input_ids = tokenized["input_ids"][:, :10]
+    positions = torch.arange(10, device=wrapper.device).unsqueeze(0)
+    with torch.no_grad():
+        full = wrapper.model(
+            input_ids=input_ids,
+            position_ids=positions,
+            use_cache=True,
+        )
+    full_layers = tuple(
+        (key.clone(), value.clone())
+        for key, value in cache_as_tensor_tuple(full.past_key_values)
+    )
+
+    manager = AttentionSinkCacheManager(cache_budget=6, sink_tokens=3)
+    compressed = manager.update(
+        full.past_key_values,
+        token_positions=list(range(10)),
+    )
+    retained = torch.tensor([0, 1, 2, 7, 8, 9])
+    assert manager.retained_positions.tolist() == retained.tolist()
+    for (full_key, full_value), (key, value) in zip(
+        full_layers, cache_as_tensor_tuple(compressed)
     ):
-        self.calls.append(
-            (
-                seq_len,
-                device,
-                dtype,
-            )
+        assert torch.equal(key, full_key.index_select(-2, retained))
+        assert torch.equal(value, full_value.index_select(-2, retained))
+
+    captured_positions = []
+
+    def capture_position_ids(module, args):
+        captured_positions.append(args[1].detach().cpu().clone())
+
+    hook = wrapper.model.model.rotary_emb.register_forward_pre_hook(
+        capture_position_ids
+    )
+    next_token = tokenized["input_ids"][:, 10:11]
+    with torch.no_grad():
+        wrapper.model(
+            input_ids=next_token,
+            position_ids=torch.tensor([[10]], device=wrapper.device),
+            past_key_values=compressed,
+            use_cache=True,
         )
-        self.max_seq_len_cached = seq_len
-
-
-class FakeAttention:
-    def __init__(self):
-        self.rotary_emb = FakeRotaryEmbedding()
-
-
-class FakeLayer:
-    def __init__(self):
-        self.self_attn = FakeAttention()
-
-
-class FakeBaseModel:
-    def __init__(self):
-        self.layers = [
-            FakeLayer(),
-        ]
-
-
-class FakeModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.model = FakeBaseModel()
-        self.weight = torch.nn.Parameter(
-            torch.ones(1)
-        )
-
-
-def test_legacy_rope_cache_is_extended():
-    model = FakeModel()
-
-    ensure_rope_cache_length(
-        model,
-        required_length=32,
-    )
-
-    rotary = (
-        model.model
-        .layers[0]
-        .self_attn
-        .rotary_emb
-    )
-
-    assert rotary.max_seq_len_cached == 32
-    assert len(rotary.calls) == 1
-    assert rotary.calls[0][0] == 32
-
-
-def test_rope_cache_is_not_rebuilt_when_large_enough():
-    model = FakeModel()
-
-    ensure_rope_cache_length(
-        model,
-        required_length=4,
-    )
-
-    rotary = (
-        model.model
-        .layers[0]
-        .self_attn
-        .rotary_emb
-    )
-
-    assert rotary.max_seq_len_cached == 8
-    assert len(rotary.calls) == 0
+    hook.remove()
+    assert captured_positions[-1].tolist() == [[10]]
+    assert captured_positions[-1].tolist() != [[6]]
 
 
 if __name__ == "__main__":
     test_absolute_position_ids_continue_after_eviction()
     test_cache_positions_are_absolute()
-    test_legacy_rope_cache_is_extended()
-    test_rope_cache_is_not_rebuilt_when_large_enough()
+    test_qwen_applies_rope_before_cache_update()
+    test_model_level_middle_eviction_preserves_positions()
 
     print("Stage 6 position-handling tests passed.")

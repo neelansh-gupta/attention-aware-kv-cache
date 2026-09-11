@@ -40,6 +40,22 @@ Stage 7 adds a deterministic correctness harness to verify the cache implementat
 
 ---
 
+# Measured Attention Instrumentation
+
+Run:
+
+    python visualise.py --max-tokens 256 --output-dir results/plots/attention
+
+The verified CPU run measured 256 tokens across all 24 layers and 14 attention
+heads. It saved JSON metrics and four plots for token-position, early-prefix,
+layer, and head aggregation. In that run, the first 1/2/4/8 tokens received
+approximately 32.70% / 33.64% / 34.89% / 37.40% of measured attention mass;
+token position 0 received the most. These are measured values for this prompt
+and model, not a hard-coded universal conclusion. Requested prefix sizes longer
+than the input are reported as unavailable.
+
+---
+
 # Approaches
 
 ## 1. Sliding Window
@@ -114,9 +130,10 @@ The implementation:
 3. Aggregates attention across attention heads.
 4. Aggregates across layers.
 5. Accumulates token-level attention scores.
-6. Selects the highest-scoring tokens.
-7. Preserves their original sequence order.
-8. Removes the remaining tokens.
+6. Reserves configured sink tokens.
+7. Reserves a configured recent local window.
+8. Fills the remaining budget with the highest-scoring middle tokens.
+9. Removes duplicates and restores original sequence order.
 
 Conceptually:
 
@@ -128,13 +145,16 @@ Conceptually:
 
     0.2 0.8 0.1 1.7 0.4 0.9 0.3 1.2
 
-                    ↓ top-K
+        ↓ sinks first, recent window second, then heavy hitters
 
     Keep:
 
-    t1  t3  t5  t7
+    t0  t3  t5  t7
 
-The selected tokens are sorted back into their original sequence order before constructing the new cache.
+Selection is deterministic: sinks have first priority, recent tokens second,
+and accumulated-score heavy hitters fill the remaining slots. Score ties are
+broken by the lower cache index. The selected tokens are sorted back into
+their original sequence order before constructing the new cache.
 
 ### Advantages
 
@@ -176,7 +196,12 @@ Stage 6 therefore separates:
 
 The generation code tracks the next absolute position independently from the current cache length.
 
-The project also handles RoPE cache extension when a required position exceeds the currently cached RoPE length.
+With the installed Transformers 5 Qwen2 implementation, RoPE is computed
+directly from `position_ids` and applied to keys before
+`past_key_values.update`. Cached keys therefore already contain their original
+rotation. Eviction slices those keys without recomputing or renumbering them,
+and each new query receives its next absolute `position_ids` value. No manual
+RoPE-table extension is required by this implementation.
 
 Implemented in:
 
@@ -190,7 +215,16 @@ Stage 7 introduces a deterministic, CPU-only correctness harness.
 
 The purpose is to verify the cache manipulation logic before running model-quality or performance benchmarks.
 
-The harness contains **19 tests**.
+`test_correctness_harness.py` contains deterministic synthetic checks.
+`test_correctness.py` is the public entry point and separates:
+
+- A: reference/cache agreement before eviction
+- B: eviction indices, K/V correspondence, metadata, and budgets
+- C: model-level Qwen middle-token position correctness
+- D: descriptive compressed-vs-full generated-token agreement
+
+Category D does not require exact equality after eviction. Model-loading
+limitations are reported as `SKIP` rather than fabricated as passes.
 
 ## Sliding Window
 
@@ -236,11 +270,10 @@ Tests verify:
 - Absolute positions after eviction
 - Correct `cache_position` generation
 
-### Final Stage 7 Result
+### Final Stage 7 commands
 
-    Stage 7 correctness harness passed (19 tests).
-
-All 19 tests pass.
+    python test_correctness_harness.py
+    python test_correctness.py
 
 ---
 
@@ -251,6 +284,7 @@ All 19 tests pass.
     ├── results/
     │
     ├── src/
+    │   ├── cache_utils.py
     │   ├── cache_manager.py
     │   ├── evictions.py
     │   ├── model_wrapper.py
@@ -261,6 +295,8 @@ All 19 tests pass.
     ├── README.md
     ├── requirements.txt
     │
+    ├── stage4_experiment.py
+    ├── test_correctness.py
     ├── test_attention_sink.py
     ├── test_correctness_harness.py
     ├── test_heavy_hitter.py
@@ -291,7 +327,7 @@ It also handles:
 - Attention-score extraction
 - Attention-score accumulation
 - Attention-mask handling
-- RoPE cache extension
+- Current/legacy Hugging Face cache inspection
 
 ---
 
@@ -331,7 +367,7 @@ Implemented functionality includes:
 
 - Absolute position ID generation
 - Absolute cache-position generation
-- RoPE cache extension
+- Absolute positions independent of physical cache length
 
 ---
 
@@ -375,7 +411,7 @@ It combines the core correctness checks for:
 
 ## `visualise.py`
 
-Utilities for visualizing experimental results.
+Runs the Stage 2 long-context attention measurement and writes plots plus JSON.
 
 ---
 
@@ -385,7 +421,7 @@ Utilities for visualizing experimental results.
 |---|---|---|
 | Stage 0 | Project foundation and scope | ✅ Complete |
 | Stage 1 | Model loading and KV cache inspection | ✅ Complete |
-| Stage 2 | Baseline generation and cache interface | ✅ Complete |
+| Stage 2 | Attention instrumentation and measured sink analysis | ✅ Complete |
 | Stage 3 | Sliding-window KV cache eviction | ✅ Complete |
 | Stage 4 | StreamingLLM-style attention-sink eviction | ✅ Complete |
 | Stage 5 | H2O-style heavy-hitter eviction | ✅ Complete |
@@ -478,8 +514,9 @@ Stage 7 adds a deterministic CPU-only correctness suite.
 Run:
 
     python test_correctness_harness.py
+    python test_correctness.py
 
-The final suite contains 19 tests covering:
+The suites cover:
 
 - Sliding-window exact selection
 - Sliding-window no-op behavior
@@ -498,12 +535,14 @@ The final suite contains 19 tests covering:
 - Invalid attention-score shapes
 - Absolute positions after eviction
 - Absolute cache positions
+- Explicit original-position metadata
+- H2O sink/recent/heavy-hitter reservations
+- Reference-vs-custom cache agreement before eviction
+- Model-level non-contiguous Qwen position handling
+- Descriptive compressed-vs-full generated-token agreement
 
-Expected result:
-
-    Stage 7 correctness harness passed (19 tests).
-
-Stage 7 intentionally does not measure generation quality, latency, or memory usage.
+The quality comparison is descriptive and does not require compressed
+generation to exactly equal full-cache generation.
 
 ---
 
@@ -540,6 +579,15 @@ Run the individual policy tests:
 Run the complete Stage 7 correctness harness:
 
     python test_correctness_harness.py
+    python test_correctness.py
+
+Run measured attention analysis:
+
+    python visualise.py --max-tokens 256 --output-dir results/plots/attention
+
+Run the real Stage 4 policy comparison:
+
+    python stage4_experiment.py
 
 ---
 
@@ -551,7 +599,8 @@ The current implementation has passed:
     Stage 4 attention-sink tests
     Stage 5 heavy-hitter tests
     Stage 6 position-handling tests
-    Stage 7 correctness harness — 19/19 tests
+    Stage 7 synthetic harness
+    Stage 7 public A/B/C/D correctness suite
 
 The model generation paths have also been exercised after the Stage 6 positional changes.
 

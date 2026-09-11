@@ -1,0 +1,23 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B",
+  "device": "cpu",
+  "sequence_length": 256,
+  "layers": 24,
+  "heads": 14,
+  "most_attended_token_position": 0,
+  "early_token_attention_fraction": {
+    "1": 0.32704324636329435,
+    "2": 0.3363858856195453,
+    "4": 0.3488528111125575,
+    "8": 0.37397799236967727
+  },
+  "uniform_first_8_fraction": 0.03125,
+  "observation": "First-8 attention exceeds a uniform-position baseline.",
+  "plot_files": [
+    "attention_by_token_position.png",
+    "early_token_attention.png",
+    "head_attention_heatmap.png",
+    "layer_attention_heatmap.png"
+  ],
+  "token_count": 256
+}

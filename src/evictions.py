@@ -219,9 +219,11 @@ def heavy_hitter_evict(
     past_key_values: Any,
     attention_scores: torch.Tensor,
     cache_budget: int,
+    sink_tokens: int = 1,
+    recent_window: int = 1,
 ):
     """
-    Keep the tokens with the highest accumulated attention scores.
+    Keep sinks, a recent window, and accumulated-attention heavy hitters.
 
     This implements the Stage 5 H2O-style heavy-hitter policy.
 
@@ -244,17 +246,19 @@ def heavy_hitter_evict(
             Maximum number of tokens to retain.
 
     Returns:
-        A tuple-style KV cache containing only the selected
-        heavy-hitter tokens, in their original sequence order.
-
-    Important:
-        Correct RoPE/position handling after non-contiguous
-        eviction is intentionally deferred to Stage 6.
+        A tuple-style KV cache containing selected tokens in their original
+        sequence order.
     """
 
     if cache_budget <= 0:
         raise ValueError(
             f"cache_budget must be positive, got {cache_budget}"
+        )
+    if sink_tokens < 0 or recent_window < 0:
+        raise ValueError("sink_tokens and recent_window must be non-negative.")
+    if sink_tokens + recent_window > cache_budget:
+        raise ValueError(
+            "sink_tokens + recent_window must not exceed cache_budget."
         )
 
     if past_key_values is None:
@@ -305,15 +309,22 @@ def heavy_hitter_evict(
             for key, value in past_key_values
         )
 
-    # Select the highest-scoring tokens.
-    top_k = torch.topk(
-        attention_scores,
-        k=cache_budget,
-        dim=-1,
-    ).indices
-
-    # Restore original sequence order.
-    selected_indices = torch.sort(top_k).values
+    # Deterministic priority: sinks, recent window, then the highest-scoring
+    # non-reserved tokens. Final indices are restored to sequence order.
+    sink = list(range(sink_tokens))
+    recent_start = max(sequence_length - recent_window, sink_tokens)
+    reserved = set(sink + list(range(recent_start, sequence_length)))
+    heavy_slots = cache_budget - len(reserved)
+    candidates = [index for index in range(sequence_length) if index not in reserved]
+    ranked = sorted(
+        candidates,
+        key=lambda index: (-float(attention_scores[index].item()), index),
+    )
+    selected_indices = torch.tensor(
+        sorted(reserved.union(ranked[:heavy_slots])),
+        dtype=torch.long,
+        device=attention_scores.device,
+    )
 
     evicted_cache = []
 

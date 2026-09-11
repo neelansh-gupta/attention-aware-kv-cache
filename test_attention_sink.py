@@ -140,12 +140,22 @@ def test_invalid_sink_configuration():
         )
 
 
+def test_original_position_metadata_has_no_duplicates():
+    cache = make_fake_cache(sequence_length=10)
+    manager = AttentionSinkCacheManager(cache_budget=6, sink_tokens=2)
+    result = manager.update(cache, token_positions=list(range(10)))
+    assert manager.retained_positions.tolist() == [0, 1, 6, 7, 8, 9]
+    assert len(set(manager.retained_positions.tolist())) == 6
+    assert result[0][0].shape[-2] == 6
+
+
 if __name__ == "__main__":
     test_attention_sink_keeps_prefix_and_suffix()
     test_attention_sink_manager_enforces_budget()
     test_attention_sink_does_not_evict_small_cache()
     test_attention_sink_preserves_all_layers()
     test_invalid_sink_configuration()
+    test_original_position_metadata_has_no_duplicates()
 
     print(
         "Stage 4 attention-sink tests passed."

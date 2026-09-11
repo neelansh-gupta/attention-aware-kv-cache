@@ -1,0 +1,50 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B",
+  "device": "cpu",
+  "prompt_tokens": 34,
+  "cache_budget": 8,
+  "max_new_tokens": 4,
+  "sliding": {
+    "generation_succeeded": true,
+    "cache_length": 8,
+    "retained_positions": [
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36
+    ],
+    "generated_token_ids": [
+      16,
+      16,
+      16,
+      16
+    ],
+    "text": "The system instruction is to answer concisely. A user discusses cache compression, attention, memory, latency, long documents, retrieval, and generation quality in detail. 1111"
+  },
+  "streaming": {
+    "generation_succeeded": true,
+    "sink_tokens": 2,
+    "cache_length": 8,
+    "retained_positions": [
+      0,
+      1,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36
+    ],
+    "generated_token_ids": [
+      16,
+      13,
+      3555,
+      374
+    ],
+    "text": "The system instruction is to answer concisely. A user discusses cache compression, attention, memory, latency, long documents, retrieval, and generation quality in detail. 1. What is"
+  }
+}

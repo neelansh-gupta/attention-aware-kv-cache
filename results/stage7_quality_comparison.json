@@ -1,0 +1,73 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B",
+  "device": "cpu",
+  "method": "greedy token agreement over four generated tokens; descriptive only",
+  "full_generated_token_ids": [
+    2619,
+    1231,
+    387,
+    7402
+  ],
+  "compressed": {
+    "sliding": {
+      "token_agreement_with_full": 0.25,
+      "generated_token_ids": [
+        2619,
+        374,
+        264,
+        1293
+      ],
+      "cache_length": 8,
+      "retained_positions": [
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25
+      ]
+    },
+    "streaming": {
+      "token_agreement_with_full": 0.25,
+      "generated_token_ids": [
+        2619,
+        525,
+        3807,
+        11178
+      ],
+      "cache_length": 8,
+      "retained_positions": [
+        0,
+        1,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25
+      ]
+    },
+    "h2o": {
+      "token_agreement_with_full": 0.25,
+      "generated_token_ids": [
+        2619,
+        525,
+        4755,
+        323
+      ],
+      "cache_length": 8,
+      "retained_positions": [
+        0,
+        2,
+        3,
+        6,
+        22,
+        23,
+        24,
+        25
+      ]
+    }
+  }
+}

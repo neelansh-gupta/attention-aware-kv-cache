@@ -2,294 +2,178 @@
 
 Postman AI/ML Recruitment Task 3 (Batch 25)
 
----
+## Current status
 
-## Overall Status
+Repair verification completed against the current repository, live runtime
+behavior, and Task 3 in `postman_25.pdf`.
 
-| Stage | Description | Status |
+| Stage | Status | Verified evidence |
 |---|---|---|
-| Stage 0 | Project foundation and scope | ✅ Complete |
-| Stage 1 | Model loading and KV cache inspection | ✅ Complete |
-| Stage 2 | Baseline generation and cache interface | ✅ Complete |
-| Stage 3 | Sliding-window KV cache eviction | ✅ Complete |
-| Stage 4 | StreamingLLM-style attention-sink-aware eviction | ✅ Complete |
-| Stage 5 | H2O-style heavy-hitter eviction | ✅ Complete |
-| Stage 6 | RoPE and position handling after eviction | ✅ Complete |
-| Stage 7 | Full correctness harness | ✅ Complete |
-| Stage 8 | Benchmarking and evaluation | ⏭️ Next |
-
----
-
-# Stage 0 — Project Foundation
-
-**Status: Complete**
-
-Established the project structure, requirements, documentation, and initial scope.
-
----
-
-# Stage 1 — Model Loading and KV Cache Inspection
-
-**Status: Complete**
-
-Implemented the model wrapper and verified that the selected language model can be loaded and used for generation.
-
-The stage also established the interface used to inspect and work with the model's KV cache.
-
----
-
-# Stage 2 — Baseline Generation and Cache Interface
-
-**Status: Complete**
-
-Established baseline generation behavior and the cache interfaces required by later eviction strategies.
-
-The project can now perform generation while accessing and manipulating the KV cache.
-
----
-
-# Stage 3 — Sliding-Window KV Cache Eviction
-
-**Status: Complete**
-
-Implemented a sliding-window eviction policy.
-
-The policy keeps the most recent tokens in the KV cache and removes older entries once the cache exceeds the configured window size.
-
-Implemented components include:
-
-- Sliding-window eviction utility
-- `SlidingWindowCacheManager`
-- Generation integration
-- Validation tests
-
-Validation:
-
-    Stage 3 sliding-window tests passed.
-
----
-
-# Stage 4 — StreamingLLM Attention-Sink Eviction
-
-**Status: Complete**
-
-Implemented a StreamingLLM-style attention-sink-aware eviction policy.
-
-The policy preserves:
-
-- A fixed number of initial sink tokens
-- The most recent tokens
-
-Older middle tokens are removed when the cache exceeds the configured budget.
-
-Implemented components include:
-
-- Attention-sink eviction utility
-- `AttentionSinkCacheManager`
-- Generation integration
-- Validation tests
-
-Validation:
-
-    Stage 4 attention-sink tests passed.
-
----
-
-# Stage 5 — H2O Heavy-Hitter Eviction
-
-**Status: Complete**
-
-Implemented an H2O-style heavy-hitter KV cache policy.
-
-The policy uses accumulated attention scores to identify tokens that should remain in the cache.
-
-Implemented components include:
-
-- Heavy-hitter eviction utility
-- `HeavyHitterCacheManager`
-- Attention-score accumulation
-- Generation integration
-- Batched attention-score handling
-- Validation tests
-
-The generation path:
-
-1. Runs the model with attention outputs enabled.
-2. Extracts attention for the newest query token.
-3. Averages attention across heads and layers.
-4. Accumulates token-level attention scores.
-5. Selects the highest-scoring tokens.
-6. Preserves their original sequence order.
-7. Evicts the remaining tokens.
-
-Validation:
-
-    Stage 5 heavy-hitter tests passed.
-
-A longer H2O generation test was also performed. The generation completed successfully, although the output became highly repetitive at a very small cache budget. This was not treated as a quality benchmark.
-
----
-
-# Stage 6 — RoPE and Position Handling
-
-**Status: Complete**
-
-Fixed positional handling after KV cache eviction.
-
-The physical length of the KV cache can decrease after eviction, but token positions must continue to represent their original absolute positions.
-
-Implemented:
-
-- Absolute `position_ids`
-- Absolute `cache_position`
-- Tracking of the next absolute token position
-- RoPE cache extension when required
-- `src/position_utils.py`
-- Position-handling regression tests
-
-The generation paths now maintain position information independently from the physical cache length.
-
-Validation:
-
-    Stage 6 position-handling tests passed.
-
-Additional generation checks were performed for:
-
-- H2O heavy-hitter generation
-- Sliding-window generation
-- StreamingLLM generation
-
-The generation paths completed successfully after the position-handling changes.
-
----
-
-# Stage 7 — Full Correctness Harness
-
-**Status: Complete**
-
-Implemented a deterministic, CPU-only correctness harness covering the cache eviction mechanisms and position-handling logic.
-
-The goal of Stage 7 is to verify **correctness of cache manipulation**, rather than model quality or benchmark performance.
-
-## Stage 7 Validation
-
-The final correctness harness contains **19 tests**.
-
-All tests passed:
-
-    PASS: test_sliding_window_exact_selection
-    PASS: test_sliding_window_no_eviction
-    PASS: test_sliding_window_repeated_application_is_stable
-
-    PASS: test_attention_sink_exact_selection
-    PASS: test_attention_sink_no_eviction
-    PASS: test_attention_sink_repeated_application_is_stable
-
-    PASS: test_heavy_hitter_exact_selection
-    PASS: test_heavy_hitter_preserves_original_order
-    PASS: test_heavy_hitter_no_eviction
-    PASS: test_heavy_hitter_accepts_batched_scores
-
-    PASS: test_sliding_window_manager
-    PASS: test_attention_sink_manager
-    PASS: test_heavy_hitter_manager_and_score_alignment
-    PASS: test_heavy_hitter_manager_accepts_batched_scores
-
-    PASS: test_invalid_manager_configuration
-    PASS: test_heavy_hitter_score_length_mismatch
-    PASS: test_invalid_heavy_hitter_score_shape
-
-    PASS: test_absolute_positions_continue_after_eviction
-    PASS: test_absolute_cache_position
-
-Final result:
-
-    Stage 7 correctness harness passed (19 tests).
-
-## What Stage 7 Verifies
-
-### Sliding Window
-
-- Exact retained-token selection
-- Correct behavior when the cache is below budget
-- Stable repeated application of eviction
-
-### Attention Sink
-
-- Exact preservation of sink and recent tokens
-- Correct no-eviction behavior
-- Stable repeated application
-
-### H2O Heavy Hitter
-
-- Correct top-k token selection
-- Original sequence ordering is preserved
-- Correct no-eviction behavior
-- Batched attention-score support
-- Attention-score and KV-cache alignment
-- Invalid score lengths and shapes are rejected
-
-### Cache Managers
-
-- Correct manager behavior for all three policies
-- Cache-budget enforcement
-- Eviction statistics
-- Stable repeated updates
-
-### Position Handling
-
-- Absolute token positions continue correctly after cache eviction
-- `cache_position` remains independent of physical cache length
-
-## Scope
-
-Stage 7 does not attempt to measure:
-
-- Perplexity
-- Generation quality
-- Throughput
-- Memory consumption
-- Latency
-
-Those measurements are part of the later benchmarking and evaluation stage.
-
----
-
-# Current Repository Components
-
-    attention-aware-kv-cache/
-    ├── results/
-    ├── src/
-    │   ├── cache_manager.py
-    │   ├── evictions.py
-    │   ├── model_wrapper.py
-    │   └── position_utils.py
-    ├── .gitignore
-    ├── PROJECT_STATUS.md
-    ├── README.md
-    ├── requirements.txt
-    ├── test_attention_sink.py
-    ├── test_correctness_harness.py
-    ├── test_heavy_hitter.py
-    ├── test_position_handling.py
-    ├── test_sliding_window.py
-    └── visualise.py
-
----
-
-# Next Stage
-
-## Stage 8 — Benchmarking and Evaluation
-
-The next stage will focus on quantitative evaluation of the different KV cache policies.
-
-Planned areas include:
-
-- Generation latency
-- Memory/cache size
-- Compression ratio
-- Generation behavior
-- Comparison across cache budgets
-- Baseline vs compressed-cache performance
-- Reproducible benchmark results
-- Result collection and visualization
+| Stage 0 | PASS | Package/docs/environment foundation present |
+| Stage 1 | COMPLETE | Current `DynamicCache` inspection and model smoke |
+| Stage 2 | COMPLETE | 256-token measured layer/head/token analysis and plots |
+| Stage 3 | COMPLETE | Reference agreement, retained metadata, K/V and generation |
+| Stage 4 | COMPLETE | Sink/recent policy tests and real two-policy experiment |
+| Stage 5 | COMPLETE | Sinks + recent + accumulated-score heavy hitters |
+| Stage 6 | COMPLETE | Real Qwen non-contiguous middle-eviction regression |
+| Stage 7 | COMPLETE | Public categorized A/B/C/D correctness entry point |
+
+**Next available stage:** Stage 8, only when explicitly requested.
+
+No Stage 8+ functionality was implemented during this repair. Existing
+untracked `benchmark.py` and `results/benchmark_*` predate this repair and are
+not used as evidence here.
+
+## Verified environment
+
+```text
+Python 3.14.4
+torch 2.14.0+cu130
+transformers 5.16.1
+CUDA available: False
+model/device: Qwen/Qwen2.5-0.5B on CPU
+```
+
+## Important implementation decisions
+
+- Cache inspection supports current `Cache.layers`, older
+  `key_cache`/`value_cache`, and legacy tuple caches without private conversion
+  APIs.
+- Attention uses eager mode and reports first 1/2/4/8 prefix fractions;
+  unavailable prefix sizes remain `null`/unavailable.
+- Every manager tracks explicit original `retained_positions`.
+- Sliding Window retains the newest K entries.
+- StreamingLLM reserves configured sinks and fills the rest with the newest
+  local entries.
+- H2O priority is deterministic: sinks, recent window, then highest accumulated
+  scores; ties favor lower indices; output returns to sequence order.
+- Qwen2 applies RoPE before cache insertion. Retained cached keys keep original
+  rotations; new tokens receive increasing absolute `position_ids`.
+- Post-eviction output equality is not a correctness assertion. Stage 7 records
+  generated-token agreement as a descriptive quality measurement.
+
+## Measured Stage 2 result
+
+Command:
+
+```bash
+python visualise.py --max-tokens 256 --output-dir results/plots/attention
+```
+
+Actual CPU result:
+
+```text
+sequence length: 256
+layers: 24
+heads: 14
+most attended token position: 0
+first 1 token fraction: 0.3270432464
+first 2 token fraction: 0.3363858856
+first 4 token fraction: 0.3488528111
+first 8 token fraction: 0.3739779924
+uniform first-8 positional baseline: 0.03125
+```
+
+Artifacts:
+
+```text
+results/plots/attention/attention_metrics.json
+results/plots/attention/attention_by_token_position.png
+results/plots/attention/early_token_attention.png
+results/plots/attention/layer_attention_heatmap.png
+results/plots/attention/head_attention_heatmap.png
+```
+
+This establishes concentration for the measured prompt/model/run; it is not
+presented as a universal hard-coded conclusion.
+
+## Stage 4 real experiment
+
+`python stage4_experiment.py` ran Sliding Window and StreamingLLM with the same
+model, 34-token prompt, budget 8, and four generated tokens.
+
+Measured retained positions:
+
+```text
+Sliding Window: [29, 30, 31, 32, 33, 34, 35, 36]
+StreamingLLM:    [0, 1, 31, 32, 33, 34, 35, 36]
+```
+
+Both generations completed and respected budget 8. Raw output:
+`results/stage4_sliding_vs_streaming.json`.
+
+## Stage 6 verified mechanism
+
+The model-level regression retains original positions
+`[0, 1, 2, 7, 8, 9]`. For every Qwen layer, retained K/V exactly equal the
+corresponding entries selected from the full cache. The next rotary call
+receives absolute position `10`, not shortened-cache position `6`.
+
+The removed `ensure_rope_cache_length` helper was unnecessary for installed
+Transformers 5 Qwen2: rotary embeddings are computed from `position_ids`
+before `past_key_values.update`.
+
+## Stage 7 categories
+
+`python test_correctness.py` verifies:
+
+- **A — Cache implementation:** full `DynamicCache` vs custom tensor view
+  before eviction, with numerical tolerance.
+- **B — Eviction:** exact indices, K/V correspondence, explicit metadata,
+  score alignment, duplicate prevention, and budgets.
+- **C — Position:** actual Qwen middle-token eviction and absolute next
+  position.
+- **D — Quality:** compressed vs full greedy-token agreement. Equality is not
+  required.
+
+Measured four-token agreement in the verified run:
+
+```text
+Sliding Window: 0.25
+StreamingLLM:   0.25
+H2O:            0.25
+```
+
+These values are only a correctness-harness smoke measurement, not a benchmark
+or general quality claim. Raw output: `results/stage7_quality_comparison.json`.
+
+## Commands used
+
+```bash
+python -m src.model_wrapper
+python visualise.py --max-tokens 256 --output-dir results/plots/attention
+python test_sliding_window.py
+python test_attention_sink.py
+python stage4_experiment.py
+python test_heavy_hitter.py
+python test_position_handling.py
+python test_correctness_harness.py
+python test_correctness.py
+```
+
+## Known limitations
+
+- Verification was CPU-only; CUDA-specific behavior was not exercised.
+- Stage 2 used a 256-token context due available CPU resources. The metrics are
+  prompt-specific.
+- The model-level position regression covers installed Transformers 5.16.1
+  Qwen2, not every historical/custom RoPE implementation.
+- Stage 7's four-token agreement is descriptive smoke data, not perplexity,
+  Needle-in-a-Haystack, or a benchmark.
+- Perplexity, NIH, benchmark infrastructure, quality-vs-memory curves, and the
+  final 2–4 page writeup belong to Stages 8–11 and remain incomplete.
+
+## Phase 1 audit status
+
+```text
+Initial Phase 1 audit: AUDITED
+Stages 0–7 repair: COMPLETE AND VERIFIED
+Stage 0: PASS
+Stage 1: COMPLETE
+Stage 2: COMPLETE
+Stage 3: COMPLETE
+Stage 4: COMPLETE
+Stage 5: COMPLETE
+Stage 6: COMPLETE
+Stage 7: COMPLETE
+```
