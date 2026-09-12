@@ -18,8 +18,9 @@ behavior, and Task 3 in `postman_25.pdf`.
 | Stage 6 | COMPLETE | Real Qwen non-contiguous middle-eviction regression |
 | Stage 7 | COMPLETE | Public categorized A/B/C/D correctness entry point |
 | Stage 8 | COMPLETE | `benchmark.py` CLI, hardware logging, measured JSON/CSV |
+| Stage 9 | COMPLETE | Perplexity + NIH under a fixed budget, raw JSON saved |
 
-**Next available stage:** Stage 9, only when explicitly requested.
+**Next available stage:** Stage 10, only when explicitly requested.
 
 ## Verified environment
 
@@ -147,6 +148,9 @@ python test_position_handling.py
 python test_correctness_harness.py
 python test_correctness.py
 python benchmark.py --all --budget 32 --max-new-tokens 4
+python test_evaluation.py
+python evaluate.py --task all --budget 32 --max-tokens 64 --nih-generate-tokens 8
+python evaluate.py --task nih --budget 32 --nih-generate-tokens 24
 ```
 
 ## Known limitations
@@ -156,12 +160,66 @@ python benchmark.py --all --budget 32 --max-new-tokens 4
   prompt-specific.
 - The model-level position regression covers installed Transformers 5.16.1
   Qwen2, not every historical/custom RoPE implementation.
-- Stage 7's four-token agreement is descriptive smoke data, not perplexity,
-  Needle-in-a-Haystack, or a benchmark.
-- Perplexity, NIH, quality-vs-memory curves, and the final 2–4 page writeup
-  belong to Stages 9–11 and remain incomplete.
+- Stage 7's four-token agreement is descriptive smoke data, not a general
+  quality ranking.
 - Stage 8 CPU peak memory is process RSS, not isolated KV-cache size. CUDA was
   unavailable during the measured run (`cuda_available: false`).
+- Stage 9 used a 64-token document and one budget (32) on CPU. NIH used 24
+  generated tokens. Results are setting-specific.
+- Quality-vs-memory curves and the final 2–4 page writeup belong to Stages
+  10–11 and remain incomplete.
+
+## Stage 9 quality evaluation
+
+Methodology:
+
+- Perplexity: teacher-forced next-token NLL while walking the same document
+  token by token. Compressed policies evict after every token. `full` never
+  evicts. `perplexity = exp(mean NLL)`.
+- NIH: unique passcode `ZX9QWERTY7731` inserted at start, middle, and end of
+  a filler haystack, then queried. Success requires the full passcode in the
+  greedy continuation.
+
+Verified commands:
+
+```bash
+python evaluate.py --task all --budget 32 --max-tokens 64 --nih-generate-tokens 8
+python evaluate.py --task nih --budget 32 --nih-generate-tokens 24
+```
+
+The 8-token NIH run truncated answers and produced false negatives, including
+for the full cache. The 24-token rerun is the recorded NIH result.
+
+Measured perplexity (64 tokens, budget 32, CPU):
+
+```text
+full:      49.7544
+sliding:   225.0877
+streaming: 103.0679
+h2o:       51.9950
+```
+
+Measured NIH success (budget 32, 24 generated tokens, CPU):
+
+```text
+depth   full  sliding  streaming  h2o
+start   True  False    False      False
+middle  True  False    False      False
+end     True  False    False      False
+```
+
+Full-cache continuations contained `ZX9QWERTY7731`. Sliding retained 0 needle
+tokens at every depth. Streaming retained 4/21 needle tokens at start (sink
+prefix) and 0 at middle/end. H2O retained a partial needle (13/21, 8/21, 3/21)
+but did not emit the full passcode.
+
+Artifacts:
+
+```text
+results/stage9_perplexity.json
+results/stage9_nih.json
+results/stage9_raw.json
+```
 
 ## Stage 8 benchmark infrastructure
 
@@ -214,4 +272,5 @@ Stage 5: COMPLETE
 Stage 6: COMPLETE
 Stage 7: COMPLETE
 Stage 8: COMPLETE
+Stage 9: COMPLETE
 ```

@@ -287,6 +287,7 @@ Tests verify:
     │   ├── cache_utils.py
     │   ├── cache_manager.py
     │   ├── evictions.py
+    │   ├── evaluation.py
     │   ├── model_wrapper.py
     │   └── position_utils.py
     │
@@ -295,11 +296,13 @@ Tests verify:
     ├── README.md
     ├── requirements.txt
     ├── benchmark.py
+    ├── evaluate.py
     │
     ├── stage4_experiment.py
     ├── test_correctness.py
     ├── test_attention_sink.py
     ├── test_correctness_harness.py
+    ├── test_evaluation.py
     ├── test_heavy_hitter.py
     ├── test_position_handling.py
     ├── test_sliding_window.py
@@ -423,6 +426,13 @@ budget, wall-clock time, and peak memory to JSON/CSV.
 
 ---
 
+## `evaluate.py`
+
+Stage 9 quality evaluation: teacher-forced perplexity and needle-in-a-haystack
+retrieval under a shared cache budget.
+
+---
+
 # Stages
 
 | Stage | Description | Status |
@@ -436,7 +446,8 @@ budget, wall-clock time, and peak memory to JSON/CSV.
 | Stage 6 | RoPE and position handling after eviction | ✅ Complete |
 | Stage 7 | Full correctness harness | ✅ Complete |
 | Stage 8 | Benchmark infrastructure | ✅ Complete |
-| Stage 9 | Perplexity and Needle-in-a-Haystack | ⏭️ Next |
+| Stage 9 | Perplexity and Needle-in-a-Haystack | ✅ Complete |
+| Stage 10 | Visualization and quality-vs-memory | ⏭️ Next |
 
 ---
 
@@ -598,6 +609,7 @@ Run the real Stage 4 policy comparison:
 
     python stage4_experiment.py
     python benchmark.py --all --budget 32 --max-new-tokens 4
+    python evaluate.py --task all --budget 32 --max-tokens 64 --nih-generate-tokens 24
 
 ---
 
@@ -622,14 +634,10 @@ These generation runs confirm that the implementations execute successfully, but
 
 The current project focuses on implementation and correctness of KV cache compression.
 
-Stage 8 records wall-clock time and peak memory for the three eviction
-policies. It does not yet measure:
+Stage 8 records wall-clock time and peak memory. Stage 9 records perplexity
+and needle-in-a-haystack success for one CPU budget/document setting.
 
-- Perplexity
-- Needle-in-a-Haystack retrieval
-- Quality-vs-memory curves across many budgets
-
-Those belong to later stages.
+It does not yet plot quality-vs-memory curves across many budgets.
 
 ---
 
@@ -655,8 +663,29 @@ bytes. CUDA peak allocation is recorded when CUDA is available.
 
 ---
 
+# Stage 9 — Perplexity and Needle-in-a-Haystack
+
+Quality evaluation uses the same token-by-token cache walk for every policy.
+
+Perplexity is `exp(mean next-token NLL)` on a fixed long document.
+
+Needle-in-a-Haystack inserts the unique passcode `ZX9QWERTY7731` at start,
+middle, and end of a filler haystack, then asks for the passcode. Success
+requires the full passcode string in the greedy continuation.
+
+    python evaluate.py --task all --budget 32 --max-tokens 64 --nih-generate-tokens 24
+
+Raw outputs:
+
+    results/stage9_perplexity.json
+    results/stage9_nih.json
+    results/stage9_raw.json
+
+The measured CPU run is documented in `PROJECT_STATUS.md`. It is prompt- and
+budget-specific, not a general ranking of policies.
+
+---
+
 # Next Stage
 
-## Stage 9 — Perplexity and Needle-in-a-Haystack
-
-Quality evaluation under a fixed cache budget.
+## Stage 10 — Visualization and quality-vs-memory
