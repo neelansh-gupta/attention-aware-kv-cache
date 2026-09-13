@@ -2,10 +2,12 @@
 Attention-Aware KV Cache Compression
 Postman AI/ML Recruitment Task 3
 
-Package layout (populated incrementally across stages):
-    model_wrapper.py  -> model loading, KV cache inspection, attention instrumentation
-    cache_manager.py  -> custom KV cache with eviction support and position tracking
-    evictions.py       -> eviction policy implementations (sliding window, streaming, H2O)
+    model_wrapper.py  -> loading, inspection, attention, compressed generation
+    cache_manager.py  -> sliding, streaming, and H2O managers
+    cache_utils.py    -> DynamicCache / legacy cache inspection
+    evictions.py      -> eviction policy implementations
+    position_utils.py -> absolute position ids after eviction
+    evaluation.py     -> teacher-forced perplexity and NIH helpers
 """
 
-__version__ = "0.0.1"
+__version__ = "1.0.0"

@@ -21,8 +21,9 @@ behavior, and Task 3 in `postman_25.pdf`.
 | Stage 9 | COMPLETE | Perplexity + NIH under a fixed budget, raw JSON saved |
 | Stage 10 | COMPLETE | Plots from saved attention, PPL, NIH, and memory results |
 | Stage 11 | COMPLETE | 2–4 page writeup from measured results only |
+| Stage 12 | COMPLETE | Final audit: sources, artifacts, WRITEUP sections, tests |
 
-**Next available stage:** Stage 12, only when explicitly requested.
+**Next available stage:** none. Numbered stages 0–12 are complete.
 
 ## Verified environment
 
@@ -158,6 +159,7 @@ python visualise.py --collect-attention --max-tokens 256
 python visualise.py
 python benchmark.py --all --budget 16 --max-new-tokens 4 --output-dir results/benchmark/budget_16
 python benchmark.py --all --budget 64 --max-new-tokens 4 --output-dir results/benchmark/budget_64
+python audit_repository.py
 ```
 
 ## Known limitations
@@ -306,7 +308,29 @@ results/benchmark_raw.csv
 artifacts: 256-token attention, Stage 4 retained positions, Stage 6 RoPE
 regression, PPL at budgets 16/32, NIH at 24 generated tokens, and CPU RSS
 plus theoretical KV size. Incomplete experiments (CUDA, more budgets, longer
-documents) are stated as limitations. Stage 12 was not started.
+documents) are stated as limitations.
+
+## Stage 12 final repository audit
+
+`python audit_repository.py` checks required sources, measured artifacts, and
+WRITEUP sections, then reruns Stages 3–7 and 9 helper tests plus the model-level
+position and public correctness suites.
+
+Verified CPU result:
+
+```text
+missing_sources: []
+missing_artifacts: []
+missing_writeup_sections: []
+fast tests: sliding, streaming, H2O, 23-test harness, evaluation helpers
+model tests: Stage 6 position handling, Stage 7 A/B/C/D
+passed: true
+```
+
+Artifact: `results/stage12_audit.json`.
+
+There is no Stage 13. Per-head or per-layer budgets were never a numbered
+stage and were not implemented.
 
 ## Phase 1 audit status
 
@@ -325,4 +349,5 @@ Stage 8: COMPLETE
 Stage 9: COMPLETE
 Stage 10: COMPLETE
 Stage 11: COMPLETE
+Stage 12: COMPLETE
 ```

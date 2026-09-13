@@ -294,7 +294,9 @@ Tests verify:
     ├── .gitignore
     ├── PROJECT_STATUS.md
     ├── README.md
+    ├── WRITEUP.md
     ├── requirements.txt
+    ├── audit_repository.py
     ├── benchmark.py
     ├── evaluate.py
     │
@@ -451,6 +453,7 @@ retrieval under a shared cache budget.
 | Stage 9 | Perplexity and Needle-in-a-Haystack | ✅ Complete |
 | Stage 10 | Visualization and quality-vs-memory | ✅ Complete |
 | Stage 11 | Technical writeup | ✅ Complete |
+| Stage 12 | Final repository audit | ✅ Complete |
 
 ---
 
@@ -640,6 +643,7 @@ The current project focuses on implementation and correctness of KV cache compre
 Stage 8 records wall-clock time and peak memory. Stage 9–10 record perplexity
 and NIH at cache budgets 16 and 32, plus measured RSS at budgets 16/32/64.
 CPU RSS does not isolate KV-cache bytes. The technical writeup is `WRITEUP.md`.
+`python audit_repository.py` is the Stage 12 reproducibility check.
 
 ---
 
@@ -719,6 +723,14 @@ policies, RoPE, experimental setup, PPL, NIH, memory, quality-vs-memory,
 H2O early-token bias, agent vs summarizer recommendations, and limitations.
 All numerical claims come from saved Stage 2–10 artifacts.
 
-# Next Stage
+---
 
-## Stage 12 — Optional stretch work
+# Stage 12 — Final repository audit
+
+    python audit_repository.py
+
+This checks required sources, measured result files, WRITEUP headings, and
+reruns the correctness tests. The last verified run is recorded in
+`results/stage12_audit.json`.
+
+Numbered stages 0–12 are complete. There is no Stage 13.
