@@ -1,0 +1,4 @@
+policy,cache_budget,repeat,prompt_tokens,generated_tokens,context_length,cache_length,wall_clock_seconds,tokens_per_second,peak_memory_mib,peak_memory_source,rss_before_mib,rss_after_mib,cuda_peak_allocated_mib
+sliding,16,1,31,4,35,16,30.12269157699984,0.13279025845931366,1761.859375,resource.ru_maxrss,814.80859375,1761.859375,
+streaming,16,1,31,4,35,16,30.083077271000093,0.13296512068783523,1761.859375,resource.ru_maxrss,1761.859375,1761.859375,
+h2o,16,1,31,4,35,16,28.16057580000006,0.14204255013848088,1761.859375,resource.ru_maxrss,1761.859375,1761.859375,

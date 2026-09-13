@@ -415,7 +415,9 @@ It combines the core correctness checks for:
 
 ## `visualise.py`
 
-Runs the Stage 2 long-context attention measurement and writes plots plus JSON.
+Stage 10 plotting. Default mode reads saved JSON/CSV/NPZ artifacts and writes
+attention, quality, and memory plots. Optional `--collect-attention` refreshes
+attention arrays from the model.
 
 ---
 
@@ -447,7 +449,8 @@ retrieval under a shared cache budget.
 | Stage 7 | Full correctness harness | ✅ Complete |
 | Stage 8 | Benchmark infrastructure | ✅ Complete |
 | Stage 9 | Perplexity and Needle-in-a-Haystack | ✅ Complete |
-| Stage 10 | Visualization and quality-vs-memory | ⏭️ Next |
+| Stage 10 | Visualization and quality-vs-memory | ✅ Complete |
+| Stage 11 | Technical writeup | ⏭️ Next |
 
 ---
 
@@ -601,9 +604,9 @@ Run the complete Stage 7 correctness harness:
     python test_correctness_harness.py
     python test_correctness.py
 
-Run measured attention analysis:
+Run plots from saved results:
 
-    python visualise.py --max-tokens 256 --output-dir results/plots/attention
+    python visualise.py
 
 Run the real Stage 4 policy comparison:
 
@@ -634,10 +637,9 @@ These generation runs confirm that the implementations execute successfully, but
 
 The current project focuses on implementation and correctness of KV cache compression.
 
-Stage 8 records wall-clock time and peak memory. Stage 9 records perplexity
-and needle-in-a-haystack success for one CPU budget/document setting.
-
-It does not yet plot quality-vs-memory curves across many budgets.
+Stage 8 records wall-clock time and peak memory. Stage 9–10 record perplexity
+and NIH at cache budgets 16 and 32, plus measured RSS at budgets 16/32/64.
+CPU RSS does not isolate KV-cache bytes. The final 2–4 page writeup is Stage 11.
 
 ---
 
@@ -686,6 +688,30 @@ budget-specific, not a general ranking of policies.
 
 ---
 
+# Stage 10 — Visualization and Quality-vs-Memory
+
+Plots are generated from saved experiment files, not from hard-coded numbers.
+
+    python visualise.py
+
+Outputs:
+
+    results/plots/attention/attention_by_token_position.png
+    results/plots/attention/early_token_attention.png
+    results/plots/attention/layer_attention_heatmap.png
+    results/plots/attention/head_attention_heatmap.png
+    results/plots/quality/perplexity_vs_budget.png
+    results/plots/quality/nih_accuracy_vs_budget.png
+    results/plots/memory/peak_memory_vs_budget.png
+    results/plots/memory/theoretical_kv_vs_budget.png
+
+Quality curves currently use measured budgets 16 and 32. Optional attention
+refresh:
+
+    python visualise.py --collect-attention --max-tokens 256
+
+---
+
 # Next Stage
 
-## Stage 10 — Visualization and quality-vs-memory
+## Stage 11 — Technical writeup

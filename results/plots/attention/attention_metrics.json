@@ -13,11 +13,6 @@
   },
   "uniform_first_8_fraction": 0.03125,
   "observation": "First-8 attention exceeds a uniform-position baseline.",
-  "plot_files": [
-    "attention_by_token_position.png",
-    "early_token_attention.png",
-    "head_attention_heatmap.png",
-    "layer_attention_heatmap.png"
-  ],
-  "token_count": 256
+  "token_count": 256,
+  "arrays_file": "attention_arrays.npz"
 }

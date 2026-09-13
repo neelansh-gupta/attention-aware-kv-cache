@@ -19,8 +19,9 @@ behavior, and Task 3 in `postman_25.pdf`.
 | Stage 7 | COMPLETE | Public categorized A/B/C/D correctness entry point |
 | Stage 8 | COMPLETE | `benchmark.py` CLI, hardware logging, measured JSON/CSV |
 | Stage 9 | COMPLETE | Perplexity + NIH under a fixed budget, raw JSON saved |
+| Stage 10 | COMPLETE | Plots from saved attention, PPL, NIH, and memory results |
 
-**Next available stage:** Stage 10, only when explicitly requested.
+**Next available stage:** Stage 11, only when explicitly requested.
 
 ## Verified environment
 
@@ -151,6 +152,11 @@ python benchmark.py --all --budget 32 --max-new-tokens 4
 python test_evaluation.py
 python evaluate.py --task all --budget 32 --max-tokens 64 --nih-generate-tokens 8
 python evaluate.py --task nih --budget 32 --nih-generate-tokens 24
+python evaluate.py --task all --budget 16 --max-tokens 64 --nih-generate-tokens 24 --output-dir results/quality/budget_16
+python visualise.py --collect-attention --max-tokens 256
+python visualise.py
+python benchmark.py --all --budget 16 --max-new-tokens 4 --output-dir results/benchmark/budget_16
+python benchmark.py --all --budget 64 --max-new-tokens 4 --output-dir results/benchmark/budget_64
 ```
 
 ## Known limitations
@@ -164,10 +170,11 @@ python evaluate.py --task nih --budget 32 --nih-generate-tokens 24
   quality ranking.
 - Stage 8 CPU peak memory is process RSS, not isolated KV-cache size. CUDA was
   unavailable during the measured run (`cuda_available: false`).
-- Stage 9 used a 64-token document and one budget (32) on CPU. NIH used 24
-  generated tokens. Results are setting-specific.
-- Quality-vs-memory curves and the final 2–4 page writeup belong to Stages
-  10–11 and remain incomplete.
+- Stage 9–10 quality curves use a 64-token document and budgets 16 and 32 on
+  CPU. NIH used 24 generated tokens. Results are setting-specific.
+- Measured peak memory is process RSS and was effectively flat across budgets
+  on this CPU run. Theoretical KV bytes scale with budget from the model config.
+- The final 2–4 page writeup belongs to Stage 11 and remains incomplete.
 
 ## Stage 9 quality evaluation
 
@@ -219,6 +226,40 @@ Artifacts:
 results/stage9_perplexity.json
 results/stage9_nih.json
 results/stage9_raw.json
+```
+
+## Stage 10 visualization
+
+`python visualise.py` reads saved JSON/CSV/NPZ files and writes plots. It does
+not hard-code experimental measurements.
+
+Additional measured quality budget (same 64-token document, 24 NIH tokens):
+
+```text
+budget 16 perplexity: sliding 379.16, streaming 118.32, h2o 104.98, full 49.75
+budget 32 perplexity: sliding 225.09, streaming 103.07, h2o 51.995, full 49.75
+NIH accuracy at 16 and 32: full 1.0, sliding/streaming/h2o 0.0
+```
+
+Measured RSS peak memory at budgets 16/32/64 was 1761.86–1762.14 MiB for all
+three policies (`resource.ru_maxrss`). Theoretical KV cache size scales with
+budget from the Qwen2.5-0.5B config.
+
+Artifacts:
+
+```text
+results/plots/attention/*.png
+results/plots/attention/attention_arrays.npz
+results/plots/quality/perplexity_vs_budget.png
+results/plots/quality/nih_accuracy_vs_budget.png
+results/plots/memory/peak_memory_vs_budget.png
+results/plots/memory/theoretical_kv_vs_budget.png
+results/plots/stage10_plot_index.json
+results/quality/budget_16/
+results/quality/budget_32/
+results/benchmark/budget_16/
+results/benchmark/budget_32/
+results/benchmark/budget_64/
 ```
 
 ## Stage 8 benchmark infrastructure
@@ -273,4 +314,5 @@ Stage 6: COMPLETE
 Stage 7: COMPLETE
 Stage 8: COMPLETE
 Stage 9: COMPLETE
+Stage 10: COMPLETE
 ```
