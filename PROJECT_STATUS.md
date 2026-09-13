@@ -20,8 +20,9 @@ behavior, and Task 3 in `postman_25.pdf`.
 | Stage 8 | COMPLETE | `benchmark.py` CLI, hardware logging, measured JSON/CSV |
 | Stage 9 | COMPLETE | Perplexity + NIH under a fixed budget, raw JSON saved |
 | Stage 10 | COMPLETE | Plots from saved attention, PPL, NIH, and memory results |
+| Stage 11 | COMPLETE | 2–4 page writeup from measured results only |
 
-**Next available stage:** Stage 11, only when explicitly requested.
+**Next available stage:** Stage 12, only when explicitly requested.
 
 ## Verified environment
 
@@ -174,7 +175,7 @@ python benchmark.py --all --budget 64 --max-new-tokens 4 --output-dir results/be
   CPU. NIH used 24 generated tokens. Results are setting-specific.
 - Measured peak memory is process RSS and was effectively flat across budgets
   on this CPU run. Theoretical KV bytes scale with budget from the model config.
-- The final 2–4 page writeup belongs to Stage 11 and remains incomplete.
+- Stage 11 writeup uses only measured artifacts; quality curves have two budgets.
 
 ## Stage 9 quality evaluation
 
@@ -299,6 +300,14 @@ results/benchmark_summary.json
 results/benchmark_raw.csv
 ```
 
+## Stage 11 technical writeup
+
+`WRITEUP.md` is the 2–4 page report. It uses only measured Stage 2–10
+artifacts: 256-token attention, Stage 4 retained positions, Stage 6 RoPE
+regression, PPL at budgets 16/32, NIH at 24 generated tokens, and CPU RSS
+plus theoretical KV size. Incomplete experiments (CUDA, more budgets, longer
+documents) are stated as limitations. Stage 12 was not started.
+
 ## Phase 1 audit status
 
 ```text
@@ -315,4 +324,5 @@ Stage 7: COMPLETE
 Stage 8: COMPLETE
 Stage 9: COMPLETE
 Stage 10: COMPLETE
+Stage 11: COMPLETE
 ```

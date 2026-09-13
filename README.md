@@ -450,7 +450,7 @@ retrieval under a shared cache budget.
 | Stage 8 | Benchmark infrastructure | ✅ Complete |
 | Stage 9 | Perplexity and Needle-in-a-Haystack | ✅ Complete |
 | Stage 10 | Visualization and quality-vs-memory | ✅ Complete |
-| Stage 11 | Technical writeup | ⏭️ Next |
+| Stage 11 | Technical writeup | ✅ Complete |
 
 ---
 
@@ -639,7 +639,7 @@ The current project focuses on implementation and correctness of KV cache compre
 
 Stage 8 records wall-clock time and peak memory. Stage 9–10 record perplexity
 and NIH at cache budgets 16 and 32, plus measured RSS at budgets 16/32/64.
-CPU RSS does not isolate KV-cache bytes. The final 2–4 page writeup is Stage 11.
+CPU RSS does not isolate KV-cache bytes. The technical writeup is `WRITEUP.md`.
 
 ---
 
@@ -712,6 +712,13 @@ refresh:
 
 ---
 
+# Stage 11 — Technical writeup
+
+The 2–4 page report is `WRITEUP.md`. It covers motivation, sinks, the three
+policies, RoPE, experimental setup, PPL, NIH, memory, quality-vs-memory,
+H2O early-token bias, agent vs summarizer recommendations, and limitations.
+All numerical claims come from saved Stage 2–10 artifacts.
+
 # Next Stage
 
-## Stage 11 — Technical writeup
+## Stage 12 — Optional stretch work
